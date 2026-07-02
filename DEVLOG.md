@@ -370,3 +370,45 @@ Avatars do not traverse this gateway: Technetium resolves member avatars via
 `getMxcAvatarUrl()` (Synapse client API), only `m.image` MESSAGE events hit
 /media. So fail-closed gating doesn't break avatars. (Future idea: serve avatars
 locally on 41chan — public, tiny, fetched once — instead of via R2/gateway.)
+
+---
+
+## 2026-07-01 -- /media originals: presigned direct-download JSON (byte-proxy superseded)
+
+The gate no longer streams LOCAL original bytes. After the same per-room
+authz (mediaauth.js, unchanged), GET /media/:server/:id without ?w= returns
+200 application/json { "url": <SigV4-presigned GET, 300s TTL> } and the
+client fetches bytes from object storage directly; the origin serves only
+the ~500 B envelope (Cache-Control: no-store -- a short-lived signature
+must not be cached and replayed stale).
+
+- A 302 redirect was tried first and abandoned: a browser fetch() following
+  a cross-origin redirect taints Origin to "null", which bucket CORS cannot
+  allowlist. JSON + plain <img src> on the client removes CORS from the
+  byte leg entirely (cross-origin <img> is unrestricted; the URL
+  self-authorizes).
+- Key derivation is pure string work on the media ID (storage mirrors the
+  Synapse media-store layout, local_content/AA/BB/rest) -- no DB coupling
+  added.
+- Presign: @aws-sdk/client-s3 + s3-request-presigner, region "auto"; R2
+  requires SigV4. ResponseCacheControl override "private,
+  max-age=31536000, immutable" on the signed GET -- stored objects carry
+  no Cache-Control, so browsers would otherwise re-download originals on
+  every view.
+- Presign failure falls back to the old Synapse proxy (delivery fallback;
+  authz already passed, not a bypass).
+- Scope: LOCAL originals only (HOMESERVER_NAME env). Thumbnails + remote
+  media still proxy (Synapse generates thumbnails lazily; they may not
+  exist in storage). The proxy branch now FORWARDS Synapse's Cache-Control
+  (public,max-age=86400,s-maxage=0,proxy-revalidate) instead of dropping
+  it: browser caching restored; s-maxage=0 still blocks shared/edge
+  caching (an edge HIT would bypass per-room authz).
+- Bucket CORS (GET/HEAD, first-party client origins) applied via the
+  provider dashboard -- object-scoped API tokens get AccessDenied on
+  bucket-config writes.
+- New env: R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
+  (gitignored .env); R2_BUCKET / R2_PRESIGN_TTL / HOMESERVER_NAME
+  (compose). New deps: @aws-sdk/client-s3, @aws-sdk/s3-request-presigner.
+
+Open: service token is read-write but only needs read+presign; thumbnail
+egress still proxies; local purge after offload remains unbuilt.

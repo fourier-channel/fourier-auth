@@ -1,6 +1,8 @@
 const express = require("express");
 const axios = require("axios");
 const cookieParser = require("cookie-parser");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState } = require("./session");
 const { getProvider } = require("./providers");
@@ -14,6 +16,55 @@ const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 const PORT = process.env.PORT || 8010;
 const COOKIE_NAME = "fourier_session";
 const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://booru.41chan.net/";
+
+// Local homeserver name as it appears in mxc URIs (the delegation host).
+// Only originals for THIS server are redirected to R2; remote-server media
+// falls through to the Synapse proxy (different key layout, small volume).
+const HOMESERVER_NAME = process.env.HOMESERVER_NAME || "41chan.net";
+
+// R2 (S3-compatible) config for presigned-URL redirects of local originals.
+const R2_ENDPOINT = process.env.R2_ENDPOINT;
+const R2_BUCKET = process.env.R2_BUCKET;
+const R2_PRESIGN_TTL = parseInt(process.env.R2_PRESIGN_TTL || "300", 10);
+const r2Enabled = !!(R2_ENDPOINT && R2_BUCKET &&
+  process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY);
+
+// R2 client. region "auto" is what Cloudflare R2 expects; credentials come
+// from the standard AWS_* names, which we map from our R2_* env explicitly.
+const s3 = r2Enabled ? new S3Client({
+  region: "auto",
+  endpoint: R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+}) : null;
+
+if (!r2Enabled) {
+  console.warn("[media] R2 not configured -- originals will proxy through Synapse");
+}
+
+// Synapse's s3-storage-provider mirrors the local media store layout into the
+// bucket: local originals live at local_content/<AA>/<BB>/<rest>, where AA/BB
+// are the first two 2-char shards of the media ID. Pure string derivation --
+// no DB, no new coupling.
+function localOriginalR2Key(mediaId) {
+  return `local_content/${mediaId.slice(0, 2)}/${mediaId.slice(2, 4)}/${mediaId.slice(4)}`;
+}
+
+// Mint a short-lived presigned GET URL for a local original in R2.
+async function presignOriginal(mediaId) {
+  const cmd = new GetObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: localOriginalR2Key(mediaId),
+    // Force R2 to return a long-lived cache header on the image response.
+    // The stored objects carry no Cache-Control, so without this the browser
+    // re-downloads the full original on every view. mxc content is immutable
+    // (Synapse mints a fresh mxc per upload), so a year + immutable is safe.
+    ResponseCacheControl: "private, max-age=31536000, immutable",
+  });
+  return getSignedUrl(s3, cmd, { expiresIn: R2_PRESIGN_TTL });
+}
 
 // Thumbnail sizes the gate will request from Synapse. Requested ?w=/?h=
 // values are snapped to the nearest entry so callers can't induce
@@ -99,7 +150,10 @@ app.options("/media/:serverName/:mediaId", (req, res) => {
   res.sendStatus(204);
 });
 
-// Media proxy: resolves the caller's session -> Matrix token, streams from Synapse.
+// Media proxy: resolves the caller's session -> Matrix token, authorizes, then
+// EITHER 302-redirects local originals to a presigned R2 URL (bytes go client
+// <- R2 directly, origin out of the path) OR streams from Synapse (thumbnails,
+// and remote-server originals).
 // Thumbnails: ?w=<px>&h=<px> (snapped to ALLOWED_THUMB_SIZES), or legacy ?thumb=1 (320).
 app.get("/media/:serverName/:mediaId", async (req, res) => {
   const { serverName, mediaId } = req.params;
@@ -143,6 +197,29 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     return res.status(403).json({ error: "not authorized for this media" });
   }
 
+  // Local original + R2 configured -> redirect to a presigned R2 URL. Bytes go
+  // client <- R2 directly; the origin never touches them. Authorization has
+  // already passed above; the short-TTL presigned URL is the release token.
+  if (!thumbSize && r2Enabled && serverName === HOMESERVER_NAME) {
+    try {
+      const signed = await presignOriginal(mediaId);
+      // Return the presigned R2 URL as JSON rather than a 302. A cross-origin
+      // 302 that the browser follows inside a CORS fetch gets its Origin
+      // tainted to "null", which R2's CORS allow-list can't match -> blocked.
+      // JSON hands the URL to the client, which loads it as a plain <img src>
+      // (images load cross-origin freely; the presigned URL self-authorizes).
+      // No-store: the URL is short-lived, so the browser must not cache this
+      // envelope and reuse a stale/expired signature.
+      res.set("Cache-Control", "no-store");
+      return res.json({ url: signed });
+    } catch (err) {
+      // Presign failure -> fall through to the Synapse proxy below rather than
+      // failing the request. Authorization already succeeded; this is a
+      // delivery-path fallback, not an authz bypass.
+      console.error("[media] presign failed, falling back to proxy:", err.message);
+    }
+  }
+
   const base = `${SYNAPSE_URL}/_matrix/client/v1/media`;
   const url = thumbSize
     ? `${base}/thumbnail/${serverName}/${mediaId}?width=${thumbSize}&height=${thumbSize}&method=scale`
@@ -163,6 +240,14 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     if (upstream.headers["content-type"]) {
       res.set("Content-Type", upstream.headers["content-type"]);
     }
+    // Forward Synapse's Cache-Control so the browser can cache media locally
+    // (kills the re-fetch-on-every-load egress). Synapse's header keeps
+    // s-maxage=0, which stops Cloudflare from EDGE-caching authenticated media
+    // -- important, since a shared-cache HIT would bypass our per-room authz.
+    // Fall back to a browser-only default if upstream omits it.
+    res.set("Cache-Control",
+      upstream.headers["cache-control"] ||
+      "private, max-age=86400, s-maxage=0");
     upstream.data.pipe(res);
   } catch (err) {
     res.status(502).json({ error: "upstream error", detail: err.message });

@@ -22,6 +22,12 @@ services:
       - SYNAPSE_DB_NAME=synapse
       - SYNAPSE_DB_USER=fourier_auth_ro
       - SYNAPSE_DB_PASSWORD=${SYNAPSE_DB_PASSWORD}
+      - R2_ENDPOINT=${R2_ENDPOINT}
+      - R2_BUCKET=matrix-media
+      - R2_PRESIGN_TTL=300
+      - HOMESERVER_NAME=41chan.net
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
     networks:
       - synapse_default
       - danbooru_default
