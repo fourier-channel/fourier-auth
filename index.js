@@ -7,6 +7,7 @@ const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState } = require("./session");
 const { getProvider } = require("./providers");
 const { checkMediaAccess } = require("./mediaauth");
+const { originalRelease } = require("./release");
 
 const app = express();
 app.use(cookieParser());
@@ -151,9 +152,10 @@ app.options("/media/:serverName/:mediaId", (req, res) => {
 });
 
 // Media proxy: resolves the caller's session -> Matrix token, authorizes, then
-// EITHER 302-redirects local originals to a presigned R2 URL (bytes go client
-// <- R2 directly, origin out of the path) OR streams from Synapse (thumbnails,
-// and remote-server originals).
+// releases local originals from R2 (content-negotiated: a 302 to a presigned URL
+// for native browser loads, or a JSON { url } envelope for fetch()/XHR callers --
+// see release.js) OR streams from Synapse (thumbnails, and remote-server
+// originals). Either way the bytes go client <- R2/Synapse, origin out of the path.
 // Thumbnails: ?w=<px>&h=<px> (snapped to ALLOWED_THUMB_SIZES), or legacy ?thumb=1 (320).
 app.get("/media/:serverName/:mediaId", async (req, res) => {
   const { serverName, mediaId } = req.params;
@@ -203,14 +205,16 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   if (!thumbSize && r2Enabled && serverName === HOMESERVER_NAME) {
     try {
       const signed = await presignOriginal(mediaId);
-      // Return the presigned R2 URL as JSON rather than a 302. A cross-origin
-      // 302 that the browser follows inside a CORS fetch gets its Origin
-      // tainted to "null", which R2's CORS allow-list can't match -> blocked.
-      // JSON hands the URL to the client, which loads it as a plain <img src>
-      // (images load cross-origin freely; the presigned URL self-authorizes).
-      // No-store: the URL is short-lived, so the browser must not cache this
-      // envelope and reuse a stale/expired signature.
+      // No-store on both paths: the presigned URL is short-lived, so neither the
+      // JSON envelope nor the 302 mapping may be cached and reused stale.
       res.set("Cache-Control", "no-store");
+      // Content-negotiate the release (see release.js for the full rationale and
+      // the never-redirect-a-cors-fetch safety invariant). Native browser loads
+      // (<img>, link navigation, download) get a 302 straight to R2 and work with
+      // no client-side resolution; fetch()/XHR callers (Technetium) keep JSON.
+      if (originalRelease(req.headers) === "redirect") {
+        return res.redirect(302, signed);
+      }
       return res.json({ url: signed });
     } catch (err) {
       // Presign failure -> fall through to the Synapse proxy below rather than
