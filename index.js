@@ -7,6 +7,7 @@ const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState } = require("./session");
 const { getProvider } = require("./providers");
 const { checkMediaAccess } = require("./mediaauth");
+const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
 
 const app = express();
@@ -152,6 +153,11 @@ app.options("/media/:serverName/:mediaId", (req, res) => {
 });
 
 // Media proxy: resolves the caller's session -> Matrix token, authorizes, then
+// nginx auth_request identity resolver: fourier_session cookie -> verified MXID
+// in the X-Fourier-Identity header. Always 2xx so auth_request never blocks a
+// public page (see verify.js). Reuses the existing getSession + COOKIE_NAME.
+app.get("/verify", makeVerifyHandler({ getSession, cookieName: COOKIE_NAME }));
+
 // releases local originals from R2 (content-negotiated: a 302 to a presigned URL
 // for native browser loads, or a JSON { url } envelope for fetch()/XHR callers --
 // see release.js) OR streams from Synapse (thumbnails, and remote-server
