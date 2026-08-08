@@ -16,7 +16,7 @@ services:
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - OIDC_REDIRECT_URI=https://booru.41chan.net/fourier/callback
       - POST_LOGIN_REDIRECT=https://booru.41chan.net/
-      - CLIENT_ORIGINS=http://127.0.0.1:5173,https://tc.41chan.net
+      - CLIENT_ORIGINS=http://127.0.0.1:5173,https://tc.41chan.net,https://element.41chan.net
       - SYNAPSE_DB_HOST=synapse-postgres-1
       - SYNAPSE_DB_PORT=5432
       - SYNAPSE_DB_NAME=synapse
