@@ -9,6 +9,7 @@ const { getProvider } = require("./providers");
 const { checkMediaAccess } = require("./mediaauth");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
+const { parseBooruFile, pickVariant, booruR2Key } = require("./booru-media");
 
 const app = express();
 app.use(cookieParser());
@@ -157,6 +158,76 @@ app.options("/media/:serverName/:mediaId", (req, res) => {
 // in the X-Fourier-Identity header. Always 2xx so auth_request never blocks a
 // public page (see verify.js). Reuses the existing getSession + COOKIE_NAME.
 app.get("/verify", makeVerifyHandler({ getSession, cookieName: COOKIE_NAME }));
+
+// --- booru-native media ----------------------------------------------------
+//
+// Objects fourier-sampling put in R2, served for a booru that holds no media
+// of its own (operator ruling 2026-08-11: R2 receives, holds and serves it).
+//
+// Deliberately NOT the /media/:serverName/:mediaId route. That one authorises
+// by Matrix room membership, which is the right question for an mxc and a
+// meaningless one here -- these objects live in no room. Reusing it would have
+// meant either weakening its authorisation or inventing a room for a 4chan
+// image. Separate route, separate rule, one job each.
+//
+// Access: a valid fourier_session is required (operator ruling). This is
+// STRICTER than the booru is today -- /data/original/<md5> currently answers
+// 200 to anyone -- so it is a tightening, not a regression. It does mean a
+// logged-out visitor sees no images, which is why it is a flag: flip
+// BOORU_MEDIA_REQUIRE_SESSION=0 to restore public bytes without a redeploy.
+//
+// Bearer tokens are NOT accepted here, unlike the mxc route. There, Synapse is
+// the downstream authority that validates the token; here there is no such
+// downstream, so honouring a Bearer would mean trusting an unvalidated string.
+// Technetium does not display booru media today; when it needs to, this wants a
+// whoami check against Synapse rather than a shortcut.
+const BOORU_MEDIA_REQUIRE_SESSION = (process.env.BOORU_MEDIA_REQUIRE_SESSION ?? "1") !== "0";
+
+app.get("/booru/:file", async (req, res) => {
+  // Parsed rather than interpolated: this string becomes an object key, and
+  // the gate is reachable by more than the booru. See booru-media.test.js.
+  const parsed = parseBooruFile(req.params.file);
+  if (!parsed) return res.status(400).json({ error: "bad media path" });
+
+  applyMediaCors(req, res);
+
+  if (!r2Enabled) {
+    // No Synapse fallback exists for these -- R2 is the only copy, by design.
+    return res.status(503).json({ error: "R2 not configured" });
+  }
+
+  // The SAME fourier login that already gates Synapse media (operator, 2026-08-11).
+  // Not a second sign-in: a user who has logged in to see mxc media is already
+  // carrying this cookie, so booru media comes with it and no new flow appears.
+  if (BOORU_MEDIA_REQUIRE_SESSION) {
+    const session = await getSession(req.cookies[COOKIE_NAME]);
+    if (!session) return res.status(401).json({ error: "no valid session" });
+  }
+
+  // ?w=/?h= mirrors the mxc route, so chanbooru builds both URL shapes alike.
+  const variant = pickVariant(req.query);
+
+  try {
+    const cmd = new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: booruR2Key(parsed.md5, parsed.ext, variant),
+      // md5-keyed content is immutable by construction, so a year is safe and
+      // saves re-fetching a full original on every view.
+      ResponseCacheControl: "private, max-age=31536000, immutable",
+    });
+    const signed = await getSignedUrl(s3, cmd, { expiresIn: R2_PRESIGN_TTL });
+    // The presigned URL is short-lived, so neither the 302 nor the JSON
+    // envelope may be cached and replayed stale.
+    res.set("Cache-Control", "no-store");
+    if (originalRelease(req.headers) === "redirect") {
+      return res.redirect(302, signed);
+    }
+    return res.json({ url: signed });
+  } catch (err) {
+    console.error("[booru-media] presign failed:", err.message);
+    return res.status(502).json({ error: "could not release media" });
+  }
+});
 
 // releases local originals from R2 (content-negotiated: a 302 to a presigned URL
 // for native browser loads, or a JSON { url } envelope for fetch()/XHR callers --
