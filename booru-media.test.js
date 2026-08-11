@@ -48,27 +48,39 @@ test("no size means the original", () => {
 });
 
 test("sizes snap to renditions we actually hold", () => {
-  assert.strictEqual(pickVariant({ w: "180" }), "180x180");
-  assert.strictEqual(pickVariant({ w: "360" }), "360x360");
-  assert.strictEqual(pickVariant({ w: "720" }), "720x720");
-  assert.strictEqual(pickVariant({ w: "850" }), "sample");
+  assert.strictEqual(pickVariant({ w: "180" }).name, "180x180");
+  assert.strictEqual(pickVariant({ w: "360" }).name, "360x360");
+  assert.strictEqual(pickVariant({ w: "720" }).name, "720x720");
+  assert.strictEqual(pickVariant({ w: "850" }).name, "sample");
   // 320 is in the Synapse thumbnail list but is NOT a booru variant. It must
   // snap to one we rendered rather than 404 an image that exists.
-  assert.strictEqual(pickVariant({ w: "320" }), "360x360");
+  assert.strictEqual(pickVariant({ w: "320" }).name, "360x360");
   // Absurd values still land somewhere real.
-  assert.strictEqual(pickVariant({ w: "5" }), "180x180");
-  assert.strictEqual(pickVariant({ w: "99999" }), "sample");
-  assert.strictEqual(pickVariant({ w: "garbage" }), "360x360"); // parseInt NaN -> 360 default
+  assert.strictEqual(pickVariant({ w: "5" }).name, "180x180");
+  assert.strictEqual(pickVariant({ w: "99999" }).name, "sample");
+  assert.strictEqual(pickVariant({ w: "garbage" }).name, "360x360");
+});
+
+test("720x720 is keyed .webp, the rest .jpg -- matching convert_file", () => {
+  // danbooru renders 720 as webp q75 and the others jpeg q85. Assuming a
+  // uniform .jpg would request an object nobody ever wrote.
+  const md5 = "f2b68ef0122f71f9dfda5d2251d3e4c8";
+  assert.strictEqual(booruR2Key(md5, ".png", pickVariant({ w: "720" })),
+    `variants/${md5}/720x720.webp`);
+  assert.strictEqual(booruR2Key(md5, ".png", pickVariant({ w: "180" })),
+    `variants/${md5}/180x180.jpg`);
+  assert.strictEqual(booruR2Key(md5, ".png", pickVariant({ w: "850" })),
+    `variants/${md5}/sample.jpg`);
 });
 
 test("a variant key is derived, and never lands in the media/ namespace", () => {
   // reconcile-r2 lists media/ to count OBJECTS. A rendition appearing there
   // would inflate that count with things that are not objects.
-  const key = booruR2Key("f2b68ef0122f71f9dfda5d2251d3e4c8", ".png", "360x360");
+  const key = booruR2Key("f2b68ef0122f71f9dfda5d2251d3e4c8", ".png", pickVariant({ w: "360" }));
   assert.strictEqual(key, "variants/f2b68ef0122f71f9dfda5d2251d3e4c8/360x360.jpg");
   assert.ok(!key.startsWith("media/"));
 });
 
 test("h is honoured as well as w", () => {
-  assert.strictEqual(pickVariant({ h: "720" }), "720x720");
+  assert.strictEqual(pickVariant({ h: "720" }).name, "720x720");
 });

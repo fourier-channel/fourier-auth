@@ -11,11 +11,15 @@
 // FOURIER_VARIANT_SIZES. Deliberately NOT ALLOWED_THUMB_SIZES, which is the set
 // Synapse will resize on demand and includes 320 -- snapping to a size nobody
 // rendered would 404 a picture that exists.
+// name AND extension, because they are not uniform: danbooru renders 720x720 as
+// webp (quality 75) and the rest as jpeg (85), per MediaAsset#convert_file.
+// fourier-sampling matches that exactly so both writers agree on one object per
+// (md5, variant). Assuming .jpg here would ask R2 for a key nobody wrote.
 const BOORU_VARIANT_SIZES = Object.freeze({
-  180: "180x180",
-  360: "360x360",
-  720: "720x720",
-  850: "sample",
+  180: { name: "180x180", ext: ".jpg" },
+  360: { name: "360x360", ext: ".jpg" },
+  720: { name: "720x720", ext: ".webp" },
+  850: { name: "sample", ext: ".jpg" },
 });
 
 // What 4chan actually serves, plus webp. The list is an allowlist rather than a
@@ -61,7 +65,7 @@ function pickVariant(query) {
  * is derived and regenerable, `thumbs/` is 4chan's own small copy.
  */
 function booruR2Key(md5, ext, variant) {
-  return variant ? `variants/${md5}/${variant}.jpg` : `media/${md5}${ext}`;
+  return variant ? `variants/${md5}/${variant.name}${variant.ext}` : `media/${md5}${ext}`;
 }
 
 module.exports = { BOORU_VARIANT_SIZES, BOORU_EXTS, parseBooruFile, pickVariant, booruR2Key };
