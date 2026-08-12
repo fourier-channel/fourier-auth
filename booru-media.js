@@ -15,11 +15,21 @@
 // webp (quality 75) and the rest as jpeg (85), per MediaAsset#convert_file.
 // fourier-sampling matches that exactly so both writers agree on one object per
 // (md5, variant). Assuming .jpg here would ask R2 for a key nobody wrote.
+// Only the renditions danbooru ALWAYS produces. Its variant_types are
+// 180x180/360x360/720x720 unconditionally, plus `sample` ONLY when the image is
+// wider than LARGE_IMAGE_WIDTH, plus `full` only for webp/avif. Snapping a
+// request to `sample` would therefore 404 on every small image -- fine while
+// fourier-sampling rendered its own sample for everything, and wrong the moment
+// danbooru became the only producer (2026-08-12).
+//
+// This is the flexible surface adapting to the strict one: danbooru's set is
+// fixed by its own UI, the gate takes any ?w= and snaps, so the gate is what
+// bends. 850 now lands on 720x720, which is a slightly smaller picture and
+// always exists -- better than a correct size that is sometimes absent.
 const BOORU_VARIANT_SIZES = Object.freeze({
   180: { name: "180x180", ext: ".jpg" },
   360: { name: "360x360", ext: ".jpg" },
   720: { name: "720x720", ext: ".webp" },
-  850: { name: "sample", ext: ".jpg" },
 });
 
 // What 4chan actually serves, plus webp. The list is an allowlist rather than a

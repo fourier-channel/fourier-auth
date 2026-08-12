@@ -51,13 +51,15 @@ test("sizes snap to renditions we actually hold", () => {
   assert.strictEqual(pickVariant({ w: "180" }).name, "180x180");
   assert.strictEqual(pickVariant({ w: "360" }).name, "360x360");
   assert.strictEqual(pickVariant({ w: "720" }).name, "720x720");
-  assert.strictEqual(pickVariant({ w: "850" }).name, "sample");
+  // 850 snaps DOWN to 720x720: danbooru only makes `sample` for large images,
+  // so snapping to it would 404 on every small one.
+  assert.strictEqual(pickVariant({ w: "850" }).name, "720x720");
   // 320 is in the Synapse thumbnail list but is NOT a booru variant. It must
   // snap to one we rendered rather than 404 an image that exists.
   assert.strictEqual(pickVariant({ w: "320" }).name, "360x360");
   // Absurd values still land somewhere real.
   assert.strictEqual(pickVariant({ w: "5" }).name, "180x180");
-  assert.strictEqual(pickVariant({ w: "99999" }).name, "sample");
+  assert.strictEqual(pickVariant({ w: "99999" }).name, "720x720");
   assert.strictEqual(pickVariant({ w: "garbage" }).name, "360x360");
 });
 
@@ -70,7 +72,7 @@ test("720x720 is keyed .webp, the rest .jpg -- matching convert_file", () => {
   assert.strictEqual(booruR2Key(md5, ".png", pickVariant({ w: "180" })),
     `variants/${md5}/180x180.jpg`);
   assert.strictEqual(booruR2Key(md5, ".png", pickVariant({ w: "850" })),
-    `variants/${md5}/sample.jpg`);
+    `variants/${md5}/720x720.webp`);
 });
 
 test("a variant key is derived, and never lands in the media/ namespace", () => {
