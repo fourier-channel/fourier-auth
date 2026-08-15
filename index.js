@@ -183,6 +183,14 @@ app.get("/verify", makeVerifyHandler({ getSession, cookieName: COOKIE_NAME }));
 // whoami check against Synapse rather than a shortcut.
 const BOORU_MEDIA_REQUIRE_SESSION = (process.env.BOORU_MEDIA_REQUIRE_SESSION ?? "1") !== "0";
 
+// How an authorized local ORIGINAL reaches a native browser load.
+//   "proxy"    stream it through here; the URL stays clean (default)
+//   "redirect" 302 to a presigned R2 URL; keeps origin bytes at zero
+// Only affects native loads. cors fetch() callers keep the JSON envelope in
+// both modes -- see release.js for why that is not negotiable.
+const ORIGINAL_RELEASE_MODE =
+  (process.env.MEDIA_ORIGINAL_RELEASE || "proxy").toLowerCase() === "redirect" ? "redirect" : "proxy";
+
 app.get("/booru/:file", async (req, res) => {
   // Parsed rather than interpolated: this string becomes an object key, and
   // the gate is reachable by more than the booru. See booru-media.test.js.
@@ -276,10 +284,37 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     return res.status(403).json({ error: "not authorized for this media" });
   }
 
-  // Local original + R2 configured -> redirect to a presigned R2 URL. Bytes go
-  // client <- R2 directly; the origin never touches them. Authorization has
-  // already passed above; the short-TTL presigned URL is the release token.
-  if (!thumbSize && r2Enabled && serverName === HOMESERVER_NAME) {
+  // Local original + R2 configured. Two ways to release it, and only ONE of
+  // them puts a credential in the address bar.
+  //
+  // The 302 hands the browser a presigned R2 URL: ~400 characters of
+  // X-Amz-Credential, X-Amz-Date, X-Amz-SignedHeaders and X-Amz-Signature,
+  // every one of them load-bearing, because for SigV4 the signature IS the
+  // authorization. That URL then lives in the DOM, in history, in devtools and
+  // in anything a page extension can read -- a bearer credential in a URL,
+  // which is precisely what this project's own rules say never to create. It
+  // was the right trade when the alternative was proxying every byte; it is
+  // not a small cost.
+  //
+  // Proxying instead reuses the streaming path already below -- the same one
+  // thumbnails and remote originals take, and the same one this branch already
+  // falls back to when a presign fails. The URL a user sees stays
+  // /media/<server>/<id> with no query string at all.
+  //
+  // What it costs, measured 2026-08-15 from the booru's own nginx over 24h:
+  // 888 original requests against 3,724 thumbnail requests, at ~2 MB an
+  // original -- about 1.7 GB/day of origin egress, and only on first view,
+  // since the response is cached privately for a year below.
+  //
+  // MEDIA_ORIGINAL_RELEASE=redirect restores the old behaviour without a
+  // redeploy, the same escape hatch BOORU_MEDIA_REQUIRE_SESSION has.
+  //
+  // The JSON envelope is NOT affected either way: a cors fetch() must keep
+  // receiving { url }, because a fetch that follows a cross-origin 302 gets its
+  // Origin tainted to "null" and R2's CORS allow-list cannot match it. See
+  // release.js -- that invariant is why this is a redirect-only change.
+  if (!thumbSize && r2Enabled && serverName === HOMESERVER_NAME
+      && !(ORIGINAL_RELEASE_MODE === "proxy" && originalRelease(req.headers) === "redirect")) {
     try {
       const signed = await presignOriginal(mediaId);
       // No-store on both paths: the presigned URL is short-lived, so neither the
@@ -326,9 +361,22 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     // s-maxage=0, which stops Cloudflare from EDGE-caching authenticated media
     // -- important, since a shared-cache HIT would bypass our per-room authz.
     // Fall back to a browser-only default if upstream omits it.
+    // A local original is content-addressed -- the bytes under an mxc id never
+    // change -- so it earns the same year-long private cache the presigned URL
+    // carried via ResponseCacheControl. Without this, moving originals onto
+    // this path would quietly cut their browser cache from a year to a day and
+    // multiply the egress the move already costs.
+    //
+    // `private` rather than Synapse's `public + s-maxage=0`: both keep the
+    // bytes out of Cloudflare's edge, which MUST hold or a shared-cache hit
+    // would bypass the per-room authorization above -- but `private` states it
+    // outright instead of relying on every proxy in the path honouring
+    // s-maxage=0.
+    const immutableOriginal = !thumbSize && serverName === HOMESERVER_NAME;
     res.set("Cache-Control",
-      upstream.headers["cache-control"] ||
-      "private, max-age=86400, s-maxage=0");
+      immutableOriginal
+        ? "private, max-age=31536000, immutable"
+        : upstream.headers["cache-control"] || "private, max-age=86400, s-maxage=0");
     upstream.data.pipe(res);
   } catch (err) {
     res.status(502).json({ error: "upstream error", detail: err.message });
