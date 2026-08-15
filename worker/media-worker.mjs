@@ -107,6 +107,14 @@ export function responseHeaders(upstreamHeaders, _kind) {
   return h;
 }
 
+/** A Matrix-shaped error, so clients read it the way they read Synapse's. */
+export function deny(status, errcode, error) {
+  return new Response(JSON.stringify({ errcode, error }), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -116,22 +124,38 @@ export default {
     if (!parsed) return fetch(request);
 
     const authorization = request.headers.get("Authorization");
-    if (!authorization) {
-      // Pass through rather than 401: the origin owns the error contract, and
-      // guessing it here would give clients a second, subtly different one.
-      return fetch(request);
-    }
+    if (!authorization) return deny(401, "M_MISSING_TOKEN", "Missing access token");
 
     const decision = await resolveUpstream(
       fetch,
       authUrl(env.FOURIER_AUTH_BASE, parsed, url.searchParams),
       authorization,
     );
+    // Kept, not temporary. A Worker that authorizes NOTHING looked exactly like
+    // one that was working, because the origin served everything it refused --
+    // which is how this shipped "verified" and was not. No token material is
+    // logged, only the decision.
+    console.log(JSON.stringify({ path: url.pathname, kind: parsed.kind, ok: decision.ok, authStatus: decision.status ?? 200 }));
+
     if (!decision.ok) {
-      // Authorization failed or the gate is unwell. Fall back to the origin so
-      // media keeps working; it costs the ruling for that request, and a broken
-      // image for every user is worse than a byte crossing the host.
-      return fetch(request);
+      // FAIL CLOSED. Operator ruling 2026-08-15: "Synapse should not be serving
+      // anything besides site assets, and especially should not be serving
+      // anything that fourier-auth denies. That is the point of fourier-auth."
+      //
+      // The previous version fell through to the origin here, reasoning that a
+      // broken image was worse than a byte crossing the host. That was wrong
+      // twice over. It defeated the authorization it had just delegated --
+      // fourier-auth said no and Synapse said yes, because Synapse authenticates
+      // the token without the per-room check MSC3916 leaves out -- and it made
+      // the Worker a silent no-op for every request it refused.
+      //
+      // Infrastructure failure fails closed too. fourier-auth being unreachable
+      // is an outage, and an outage that hides itself by leaking bytes is the
+      // exact failure mode this whole system has been unpicking all week.
+      const status = decision.status === 401 || decision.status === 403 ? decision.status : 502;
+      return deny(status,
+        status === 401 ? "M_UNAUTHORIZED" : status === 403 ? "M_FORBIDDEN" : "M_UNKNOWN",
+        status === 502 ? "Media authorization is unavailable" : "Not authorized for this media");
     }
 
     // Edge cache keyed on the R2 object, NOT on the client's request -- so two
@@ -148,7 +172,9 @@ export default {
         ctx.waitUntil(cache.put(cacheKey, cacheable));
       }
     }
-    if (!upstream.ok) return fetch(request);
+    // Authorized, but the object could not be read. Still no origin fallback:
+    // the answer is a visible error, not a byte that should not exist.
+    if (!upstream.ok) return deny(502, "M_UNKNOWN", "Media store unavailable");
 
     return new Response(upstream.body, {
       status: 200,

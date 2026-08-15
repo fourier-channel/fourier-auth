@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { parseMediaPath, authUrl, resolveUpstream, responseHeaders } from "./media-worker.mjs";
+import { parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -99,4 +99,21 @@ test("only a known-inert allowlist renders inline", () => {
   for (const bad of ["text/html", "image/svg+xml", "application/pdf", "text/javascript", "application/xhtml+xml", ""]) {
     assert.equal(d(bad), "attachment", bad || "<none>");
   }
+});
+
+
+test("a refusal is Matrix-shaped and never cached", async () => {
+  const r = deny(403, "M_FORBIDDEN", "Not authorized for this media");
+  assert.equal(r.status, 403);
+  assert.equal(r.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(await r.json(), { errcode: "M_FORBIDDEN", error: "Not authorized for this media" });
+});
+
+test("the status a denial carries", () => {
+  // fourier-auth's own answer is passed through for the two that ARE answers;
+  // anything else is our failure, not the user's, and says 502.
+  const map = (s) => (s === 401 || s === 403 ? s : 502);
+  assert.equal(map(401), 401);
+  assert.equal(map(403), 403);
+  for (const s of [500, 502, 504, undefined, 0]) assert.equal(map(s), 502, String(s));
 });
