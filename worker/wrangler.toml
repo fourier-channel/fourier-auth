@@ -1,0 +1,14 @@
+name = "fourier-media"
+main = "media-worker.mjs"
+compatibility_date = "2026-08-15"
+
+# The route Element already uses. No client change, no new hostname, no DNS
+# record -- the Worker sits in front of the path Synapse serves today.
+[[routes]]
+pattern = "matrix.41chan.net/_matrix/client/v1/media/*"
+zone_name = "41chan.net"
+
+[vars]
+# Where the authorization decision comes from. Not a secret: it answers only
+# to a valid Matrix token, and holds no credential of its own.
+FOURIER_AUTH_BASE = "https://mxc.41chan.net"

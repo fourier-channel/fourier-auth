@@ -4,11 +4,12 @@ const cookieParser = require("cookie-parser");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createSession, getSession, destroySession, redisPing,
-        putOidcState, takeOidcState } = require("./session");
+        putOidcState, takeOidcState, cacheGetJson, cacheSetJson } = require("./session");
 const { getProvider } = require("./providers");
 const { checkMediaAccess } = require("./mediaauth");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
+const { resolveR2Key } = require("./mediar2");
 const { parseBooruFile, pickVariant, booruR2Key } = require("./booru-media");
 
 const app = express();
@@ -47,19 +48,14 @@ if (!r2Enabled) {
   console.warn("[media] R2 not configured -- originals will proxy through Synapse");
 }
 
-// Synapse's s3-storage-provider mirrors the local media store layout into the
-// bucket: local originals live at local_content/<AA>/<BB>/<rest>, where AA/BB
-// are the first two 2-char shards of the media ID. Pure string derivation --
-// no DB, no new coupling.
-function localOriginalR2Key(mediaId) {
-  return `local_content/${mediaId.slice(0, 2)}/${mediaId.slice(2, 4)}/${mediaId.slice(4)}`;
-}
+// Key derivation for every media class lives in mediar2.js -- one copy, so
+// local and remote shapes cannot drift apart.
 
 // Mint a short-lived presigned GET URL for a local original in R2.
-async function presignOriginal(mediaId) {
+async function presignKey(key) {
   const cmd = new GetObjectCommand({
     Bucket: R2_BUCKET,
-    Key: localOriginalR2Key(mediaId),
+    Key: key,
     // Force R2 to return a long-lived cache header on the image response.
     // The stored objects carry no Cache-Control, so without this the browser
     // re-downloads the full original on every view. mxc content is immutable
@@ -291,7 +287,8 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     return res.status(403).json({ error: "not authorized for this media" });
   }
 
-  // Local original + R2 configured. Two ways to release it, and only ONE of
+  // R2 release, for EVERY class of media this gate can serve -- local and
+  // remote, original and thumbnail. Two ways to hand it over, and only ONE of
   // them puts a credential in the address bar.
   //
   // The 302 hands the browser a presigned R2 URL: ~400 characters of
@@ -323,10 +320,30 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // receiving { url }, because a fetch that follows a cross-origin 302 gets its
   // Origin tainted to "null" and R2's CORS allow-list cannot match it. See
   // release.js -- that invariant is why this is a redirect-only change.
-  if (!thumbSize && r2Enabled && serverName === HOMESERVER_NAME
+  //
+  // Widened 2026-08-15 from local-originals-only. Thumbnails and remote
+  // originals were streaming through this host -- 3,724 thumbnail requests in
+  // 24h -- which the ruling forbids exactly as much as bytes at rest. A
+  // thumbnail key is not derivable from the request (the stored name carries
+  // the RENDERED size, not the requested one), so mediar2.js resolves it by
+  // listing that object's own thumbnail prefix, cached hard because a
+  // rendition is immutable once written.
+  //
+  // resolveR2Key returning null means R2 genuinely does not hold it, and the
+  // streaming fallback below is then correct rather than a failure.
+  if (r2Enabled
       && !(ORIGINAL_RELEASE_MODE === "proxy" && originalRelease(req.headers) === "redirect")) {
     try {
-      const signed = await presignOriginal(mediaId);
+      const key = await resolveR2Key(s3, R2_BUCKET, {
+        serverName,
+        mediaId,
+        isLocal: serverName === HOMESERVER_NAME,
+        thumbSize,
+        method: "scale",
+        cache: { get: cacheGetJson, set: cacheSetJson },
+      });
+      if (!key) throw new Error("not in R2");
+      const signed = await presignKey(key);
       // No-store on both paths: the presigned URL is short-lived, so neither the
       // JSON envelope nor the 302 mapping may be cached and reused stale.
       res.set("Cache-Control", "no-store");
@@ -342,7 +359,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
       // Presign failure -> fall through to the Synapse proxy below rather than
       // failing the request. Authorization already succeeded; this is a
       // delivery-path fallback, not an authz bypass.
-      console.error("[media] presign failed, falling back to proxy:", err.message);
+      // Not an error path in the usual sense: R2 not holding an object is a
+      // real and expected state (74 zero-byte failed federation fetches, plus
+      // anything mid-upload). Falling through streams it, which is worse for
+      // the ruling but better than a broken image.
+      console.error(`[media] R2 release unavailable for ${serverName}/${mediaId}, proxying:`, err.message);
     }
   }
 
