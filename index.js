@@ -184,12 +184,19 @@ app.get("/verify", makeVerifyHandler({ getSession, cookieName: COOKIE_NAME }));
 const BOORU_MEDIA_REQUIRE_SESSION = (process.env.BOORU_MEDIA_REQUIRE_SESSION ?? "1") !== "0";
 
 // How an authorized local ORIGINAL reaches a native browser load.
-//   "proxy"    stream it through here; the URL stays clean (default)
-//   "redirect" 302 to a presigned R2 URL; keeps origin bytes at zero
+//   "redirect" 302 to a presigned R2 URL; no media byte touches this host (default)
+//   "proxy"    stream it through here; clean URL, but THIS HOST SERVES THE BYTES
+//
+// The default is not a performance choice. Operator ruling, restated
+// 2026-08-15: "41chan is not supposed to hold media or serve media outside of
+// site assets." The host does not permit adult content, and that applies to
+// bytes in transit through it, not only to bytes at rest on it. `proxy` exists
+// to be switchable for a deployment where that constraint does not apply; on
+// 41chan it must stay off.
 // Only affects native loads. cors fetch() callers keep the JSON envelope in
 // both modes -- see release.js for why that is not negotiable.
 const ORIGINAL_RELEASE_MODE =
-  (process.env.MEDIA_ORIGINAL_RELEASE || "proxy").toLowerCase() === "redirect" ? "redirect" : "proxy";
+  (process.env.MEDIA_ORIGINAL_RELEASE || "redirect").toLowerCase() === "proxy" ? "proxy" : "redirect";
 
 app.get("/booru/:file", async (req, res) => {
   // Parsed rather than interpolated: this string becomes an object key, and
@@ -296,18 +303,21 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // was the right trade when the alternative was proxying every byte; it is
   // not a small cost.
   //
-  // Proxying instead reuses the streaming path already below -- the same one
-  // thumbnails and remote originals take, and the same one this branch already
-  // falls back to when a presign fails. The URL a user sees stays
-  // /media/<server>/<id> with no query string at all.
+  // Proxying instead would reuse the streaming path below and give a clean URL
+  // -- and it is WRONG HERE, which is worth writing down because the code alone
+  // makes it look like a free improvement.
   //
-  // What it costs, measured 2026-08-15 from the booru's own nginx over 24h:
-  // 888 original requests against 3,724 thumbnail requests, at ~2 MB an
-  // original -- about 1.7 GB/day of origin egress, and only on first view,
-  // since the response is cached privately for a year below.
+  // Operator ruling, restated 2026-08-15: "41chan is not supposed to hold media
+  // or serve media outside of site assets." The host does not permit adult
+  // content. That constraint covers bytes TRANSITING this machine, not only
+  // bytes at rest on it -- the same reason the sampling spool is a tmpfs. A
+  // proxy here would have put ~1.7 GB/day of user media through this host
+  // (888 original requests in 24h at ~2 MB each, measured from the booru's own
+  // nginx), which is exactly what the ruling forbids.
   //
-  // MEDIA_ORIGINAL_RELEASE=redirect restores the old behaviour without a
-  // redeploy, the same escape hatch BOORU_MEDIA_REQUIRE_SESSION has.
+  // So the long URL stays, and the right fix for it is somewhere else: a
+  // Cloudflare Worker fronting R2, where the bytes never enter 41chan at all.
+  // See MEDIA-URLS.md.
   //
   // The JSON envelope is NOT affected either way: a cors fetch() must keep
   // receiving { url }, because a fetch that follows a cross-origin 302 gets its
@@ -363,9 +373,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     // Fall back to a browser-only default if upstream omits it.
     // A local original is content-addressed -- the bytes under an mxc id never
     // change -- so it earns the same year-long private cache the presigned URL
-    // carried via ResponseCacheControl. Without this, moving originals onto
-    // this path would quietly cut their browser cache from a year to a day and
-    // multiply the egress the move already costs.
+    // carries via ResponseCacheControl. This applies to the paths that DO still
+    // stream through this host (thumbnails, remote originals, and the
+    // presign-failure fallback): the longer a browser holds them, the fewer
+    // media bytes cross this machine, which is the constraint that matters here
+    // rather than the bandwidth.
     //
     // `private` rather than Synapse's `public + s-maxage=0`: both keep the
     // bytes out of Cloudflare's edge, which MUST hold or a shared-cache hit
