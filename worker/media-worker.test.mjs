@@ -135,3 +135,24 @@ test("the preflight contract matches Synapse's", () => {
     "a client that cannot send Authorization cannot fetch authenticated media at all");
   assert.ok(c["Access-Control-Allow-Methods"].includes("GET"));
 });
+
+test("either credential is accepted, and a Bearer wins when both are sent", async () => {
+  // The booru's <img> cannot send a header, so it presents the site-wide
+  // session cookie instead. Same identity, same check, different proof.
+  let seen = null;
+  const fake = async (_u, init) => { seen = init.headers; return { status: 200, json: async () => ({ url: "https://r2/x" }) }; };
+  await resolveUpstream(fake, "u", { authorization: null, cookie: "fourier_session=abc" });
+  assert.equal(seen.Cookie, "fourier_session=abc");
+  assert.equal(seen.Authorization, undefined);
+
+  await resolveUpstream(fake, "u", { authorization: "Bearer t", cookie: "fourier_session=abc" });
+  assert.equal(seen.Authorization, "Bearer t");
+  assert.equal(seen.Cookie, undefined, "a Bearer must not be sent alongside a cookie");
+});
+
+test("the old string signature still works", async () => {
+  let seen = null;
+  const fake = async (_u, init) => { seen = init.headers; return { status: 200, json: async () => ({ url: "https://r2/x" }) }; };
+  await resolveUpstream(fake, "u", "Bearer t");
+  assert.equal(seen.Authorization, "Bearer t");
+});

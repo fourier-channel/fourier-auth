@@ -66,15 +66,21 @@ export function authUrl(base, { serverName, mediaId, kind }, searchParams) {
  * would work, but the envelope means the presigned URL never becomes a
  * client-visible Location header even by accident.
  */
-export async function resolveUpstream(fetchImpl, url, authorization) {
-  const res = await fetchImpl(url, {
-    headers: {
-      Authorization: authorization,
-      Accept: "application/json",
-      "Sec-Fetch-Mode": "cors",
-      "Sec-Fetch-Dest": "empty",
-    },
-  });
+export async function resolveUpstream(fetchImpl, url, credentials) {
+  // Accepts either shape, forwards whichever it was given. A Bearer wins when
+  // both are present, matching fourier-auth's own precedence -- one rule about
+  // which credential speaks, written in one place and mirrored here rather
+  // than invented.
+  const { authorization, cookie } =
+    typeof credentials === "string" ? { authorization: credentials, cookie: null } : credentials;
+  const headers = {
+    Accept: "application/json",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+  };
+  if (authorization) headers.Authorization = authorization;
+  else if (cookie) headers.Cookie = cookie;
+  const res = await fetchImpl(url, { headers });
   if (res.status !== 200) return { ok: false, status: res.status };
   const body = await res.json().catch(() => null);
   if (!body || typeof body.url !== "string") return { ok: false, status: 502 };
@@ -156,13 +162,23 @@ export default {
       return new Response(null, { status: 204, headers: { ...corsHeaders(), "Access-Control-Max-Age": "86400" } });
     }
 
+    // TWO ways to present the same identity, because 41chan is one site with
+    // several surfaces into the same data:
+    //
+    //   Authorization: Bearer   Matrix clients (Element, Technetium)
+    //   Cookie: fourier_session the booru, whose <img> tags cannot send a header
+    //
+    // Both are handed to fourier-auth, which resolves either to a Matrix
+    // identity and applies the SAME rule. The surface does not get to decide
+    // what a user may see; it only decides how it proves who they are.
     const authorization = request.headers.get("Authorization");
-    if (!authorization) return deny(401, "M_MISSING_TOKEN", "Missing access token");
+    const cookie = request.headers.get("Cookie");
+    if (!authorization && !cookie) return deny(401, "M_MISSING_TOKEN", "Missing access token");
 
     const decision = await resolveUpstream(
       fetch,
       authUrl(env.FOURIER_AUTH_BASE, parsed, url.searchParams),
-      authorization,
+      { authorization, cookie },
     );
     // Kept, not temporary. A Worker that authorizes NOTHING looked exactly like
     // one that was working, because the origin served everything it refused --

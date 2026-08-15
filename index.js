@@ -19,6 +19,25 @@ app.use(express.json());
 const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 const PORT = process.env.PORT || 8010;
 const COOKIE_NAME = "fourier_session";
+
+// The session cookie is scoped to the WHOLE SITE, not to the host that mints it.
+//
+// Operator ruling 2026-08-15: "41chan is 41chan... the entire site is supposed
+// to be multiple surfaces into the same exact data. One source of truth."
+//
+// It was host-only to mxc.41chan.net, which meant the booru could not present
+// it to the media endpoint on matrix.41chan.net -- so the booru would have
+// needed its own authorization path to show the same bytes, which is precisely
+// the duplication this service exists to remove. A `.41chan.net` cookie lets
+// every surface present the same session and get the same answer from the same
+// check.
+//
+// sameSite stays "lax": booru.41chan.net and matrix.41chan.net are the same
+// SITE, so a subresource load from one to the other is same-site and the cookie
+// rides along. secure is set because every surface is HTTPS and a session
+// cookie has no business travelling in clear.
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || ".41chan.net";
+const COOKIE_OPTS = { httpOnly: true, sameSite: "lax", secure: true, domain: COOKIE_DOMAIN, path: "/" };
 const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://booru.41chan.net/";
 
 // Local homeserver name as it appears in mxc URIs (the delegation host).
@@ -127,7 +146,7 @@ app.get("/callback", async (req, res) => {
       matrixUserId: identity.matrixUserId,
       matrixToken: identity.matrixToken,
     });
-    res.cookie(COOKIE_NAME, sid, { httpOnly: true, sameSite: "lax" });
+    res.cookie(COOKIE_NAME, sid, COOKIE_OPTS);
     res.redirect(POST_LOGIN_REDIRECT);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
@@ -137,7 +156,9 @@ app.get("/callback", async (req, res) => {
 // Logout
 app.post("/logout", async (req, res) => {
   await destroySession(req.cookies[COOKIE_NAME]);
-  res.clearCookie(COOKIE_NAME);
+  // Same attributes, or the browser treats it as a different cookie and the
+  // logout silently leaves the session cookie in place.
+  res.clearCookie(COOKIE_NAME, COOKIE_OPTS);
   res.json({ ok: true });
 });
 
