@@ -64,6 +64,12 @@ const SITE_ASSET_TTL = 6 * 60 * 60;
  * should not enter into this equation at all, beyond 'is this user on my
  * server?'"
  *
+ * Emoji packs count too (im.ponies.room_emotes / user_emotes / m.image_pack),
+ * for the same reason: a reaction image is chrome. Technetium marks them
+ * viaHomeserver at the call site with a comment saying "an emoji is CHROME" --
+ * the client had already worked out the right taxonomy and had nowhere on the
+ * server to express it.
+ *
  * This distinction is the whole reason the gate was 403ing every profile
  * picture. Chrome was being asked a question that only makes sense of content:
  * "which room is this in". An avatar is in no room and in every room at once,
@@ -84,6 +90,10 @@ async function isSiteAsset(mxc) {
         or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id
                     where e.type = 'm.room.avatar'
                       and ej.json::jsonb #>> '{content,url}' = $1)
+        or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id,
+                        lateral jsonb_each(coalesce(ej.json::jsonb #> '{content,images}', '{}'::jsonb)) img
+                    where e.type in ('im.ponies.room_emotes', 'im.ponies.user_emotes', 'm.image_pack')
+                      and img.value ->> 'url' = $1)
       limit 1`,
     [mxc]
   );
