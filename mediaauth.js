@@ -52,6 +52,60 @@ pool.on("error", (err) => {
 
 // Which rooms contain an m.image message whose content.url is this mxc.
 // Cached by mxc (long). Throws on DB error -> caller fails closed.
+// How long a site-asset classification is good for. An mxc does not change
+// what it IS -- an avatar never becomes message content -- so this is only
+// bounded to pick up a media that becomes an avatar later.
+const SITE_ASSET_TTL = 6 * 60 * 60;
+
+/**
+ * Is this mxc a SITE ASSET rather than content?
+ *
+ * Operator ruling 2026-08-15: "Avatars, emojis, room icons -- SITE ASSETS --
+ * should not enter into this equation at all, beyond 'is this user on my
+ * server?'"
+ *
+ * This distinction is the whole reason the gate was 403ing every profile
+ * picture. Chrome was being asked a question that only makes sense of content:
+ * "which room is this in". An avatar is in no room and in every room at once,
+ * so the honest answer was zero rooms, and fail-closed denied it. Technetium
+ * had already routed around it -- fetchHomeserverThumb bypasses this gate
+ * entirely, with a comment saying why -- which is exactly the kind of second
+ * path this service exists to make unnecessary.
+ */
+async function isSiteAsset(mxc) {
+  const cacheKey = "siteasset:" + mxc;
+  const cached = await cacheGetJson(cacheKey).catch(() => null);
+  if (cached !== null && cached !== undefined) return cached.v;
+  const { rows } = await pool.query(
+    `select 1 where exists (select 1 from profiles where avatar_url = $1)
+        or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id
+                    where e.type = 'm.room.member'
+                      and ej.json::jsonb #>> '{content,avatar_url}' = $1)
+        or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id
+                    where e.type = 'm.room.avatar'
+                      and ej.json::jsonb #>> '{content,url}' = $1)
+      limit 1`,
+    [mxc]
+  );
+  const yes = rows.length > 0;
+  await cacheSetJson(cacheKey, { v: yes }, SITE_ASSET_TTL).catch(() => {});
+  return yes;
+}
+
+/** Is this token valid on THIS server? The only question a site asset asks. */
+async function tokenIsOurs(token) {
+  try {
+    const r = await axios.get(`${SYNAPSE_URL}/_matrix/client/v3/account/whoami`, {
+      headers: { Authorization: `Bearer ${token}` },
+      validateStatus: () => true,
+      timeout: 5000,
+    });
+    return r.status === 200 && typeof r.data?.user_id === "string";
+  } catch {
+    return false;
+  }
+}
+
 async function resolveMediaRooms(mxc) {
   const cacheKey = "mediarooms:" + mxc;
   const cached = await cacheGetJson(cacheKey).catch(() => null);
@@ -109,9 +163,25 @@ async function getJoinedRooms(token) {
 }
 
 // The gate. true = allow, false = deny. Fail closed on ANY error.
+/**
+ * May this token have this mxc? TWO rules, and which one applies is decided by
+ * what the object IS, not by which surface asked.
+ *
+ *   SITE ASSET (avatar, room icon, emoji) -> is this user on my server?
+ *   CONTENT (anything posted in a room)   -> are they in a room containing it?
+ *
+ * Both fail closed. There is no third answer and no fallback: a denial here is
+ * final, and nothing else on this box will serve the bytes instead.
+ */
 async function checkMediaAccess(token, serverName, mediaId) {
   const mxc = `mxc://${serverName}/${mediaId}`;
   try {
+    if (await isSiteAsset(mxc)) {
+      // Chrome. Asking "which room is this in" of an avatar is a category
+      // error -- it is in none and in all of them -- and asking it is what
+      // made every profile picture on the server 403.
+      return await tokenIsOurs(token);
+    }
     const [mediaRooms, joinedRooms] = await Promise.all([
       resolveMediaRooms(mxc),
       getJoinedRooms(token),
@@ -125,4 +195,4 @@ async function checkMediaAccess(token, serverName, mediaId) {
   }
 }
 
-module.exports = { checkMediaAccess, resolveMediaRooms, getJoinedRooms };
+module.exports = { checkMediaAccess, resolveMediaRooms, getJoinedRooms, isSiteAsset, tokenIsOurs };

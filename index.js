@@ -367,53 +367,17 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     }
   }
 
-  const base = `${SYNAPSE_URL}/_matrix/client/v1/media`;
-  const url = thumbSize
-    ? `${base}/thumbnail/${serverName}/${mediaId}?width=${thumbSize}&height=${thumbSize}&method=scale`
-    : `${base}/download/${serverName}/${mediaId}`;
-
-  try {
-    const upstream = await axios.get(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      responseType: "stream",
-      validateStatus: () => true,
-    });
-    if (upstream.status !== 200) {
-      return res.status(upstream.status).json({
-        error: "synapse refused media request",
-        status: upstream.status,
-      });
-    }
-    if (upstream.headers["content-type"]) {
-      res.set("Content-Type", upstream.headers["content-type"]);
-    }
-    // Forward Synapse's Cache-Control so the browser can cache media locally
-    // (kills the re-fetch-on-every-load egress). Synapse's header keeps
-    // s-maxage=0, which stops Cloudflare from EDGE-caching authenticated media
-    // -- important, since a shared-cache HIT would bypass our per-room authz.
-    // Fall back to a browser-only default if upstream omits it.
-    // A local original is content-addressed -- the bytes under an mxc id never
-    // change -- so it earns the same year-long private cache the presigned URL
-    // carries via ResponseCacheControl. This applies to the paths that DO still
-    // stream through this host (thumbnails, remote originals, and the
-    // presign-failure fallback): the longer a browser holds them, the fewer
-    // media bytes cross this machine, which is the constraint that matters here
-    // rather than the bandwidth.
-    //
-    // `private` rather than Synapse's `public + s-maxage=0`: both keep the
-    // bytes out of Cloudflare's edge, which MUST hold or a shared-cache hit
-    // would bypass the per-room authorization above -- but `private` states it
-    // outright instead of relying on every proxy in the path honouring
-    // s-maxage=0.
-    const immutableOriginal = !thumbSize && serverName === HOMESERVER_NAME;
-    res.set("Cache-Control",
-      immutableOriginal
-        ? "private, max-age=31536000, immutable"
-        : upstream.headers["cache-control"] || "private, max-age=86400, s-maxage=0");
-    upstream.data.pipe(res);
-  } catch (err) {
-    res.status(502).json({ error: "upstream error", detail: err.message });
-  }
+  // NO PROXY FALLBACK. Operator ruling 2026-08-15: "There is no intended
+  // fallback. None." and "41chan is not supposed to hold media or serve media
+  // outside of site assets."
+  //
+  // This used to stream from Synapse whenever R2 could not answer -- for
+  // thumbnails, for remote originals, and whenever a presign failed. Every one
+  // of those was media bytes crossing this host, and worse, it meant a request
+  // this gate had ALREADY AUTHORIZED could still be served from somewhere else,
+  // so the gate's answer was never the last word. It is now.
+  console.error(`[media] no R2 object for ${serverName}/${mediaId}`);
+  return res.status(404).json({ errcode: "M_NOT_FOUND", error: "media not in object storage" });
 });
 
 app.listen(PORT, () => {
