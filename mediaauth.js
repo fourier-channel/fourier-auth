@@ -56,12 +56,27 @@ async function resolveMediaRooms(mxc) {
   const cacheKey = "mediarooms:" + mxc;
   const cached = await cacheGetJson(cacheKey).catch(() => null);
   if (cached) return cached;
+  // Every place an mxc can legitimately appear, not just message bodies.
+  //
+  // This asked only about m.room.message + content.url, which silently missed
+  // AVATARS -- they live in m.room.member (content.avatar_url) and
+  // m.room.avatar (content.url). An avatar therefore resolved to no rooms,
+  // fail-closed denied it, and the gate 403'd every profile picture on the
+  // server. It went unnoticed because Synapse served them anyway on its own
+  // authenticated endpoint; the moment that fall-through was closed, every
+  // avatar in every client broke at once.
+  //
+  // Also covered: m.sticker, and thumbnail_url inside a message's info block --
+  // a thumbnail is a different mxc from its original and was equally invisible.
   const { rows } = await pool.query(
     `select distinct e.room_id
        from events e
        join event_json ej on e.event_id = ej.event_id
-      where e.type = 'm.room.message'
-        and ej.json::jsonb #>> '{content,url}' = $1`,
+      where (e.type in ('m.room.message', 'm.sticker')
+              and (ej.json::jsonb #>> '{content,url}' = $1
+                or ej.json::jsonb #>> '{content,info,thumbnail_url}' = $1))
+         or (e.type = 'm.room.avatar' and ej.json::jsonb #>> '{content,url}' = $1)
+         or (e.type = 'm.room.member' and ej.json::jsonb #>> '{content,avatar_url}' = $1)`,
     [mxc]
   );
   const roomIds = rows.map((r) => r.room_id);

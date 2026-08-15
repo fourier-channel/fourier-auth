@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny } from "./media-worker.mjs";
+import { parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -116,4 +116,22 @@ test("the status a denial carries", () => {
   assert.equal(map(401), 401);
   assert.equal(map(403), 403);
   for (const s of [500, 502, 504, undefined, 0]) assert.equal(map(s), 502, String(s));
+});
+
+test("CORS is on every response, including refusals", () => {
+  // Technetium runs on localhost and reads media cross-origin. A denial without
+  // Access-Control-Allow-Origin is unreadable to it -- the browser reports a
+  // CORS error and hides the 401, so the client cannot even tell the user why.
+  const r = deny(401, "M_UNAUTHORIZED", "no");
+  assert.equal(r.headers.get("Access-Control-Allow-Origin"), "*");
+  const h = responseHeaders(new Headers({ "content-type": "image/png" }), "download");
+  assert.equal(h.get("Access-Control-Allow-Origin"), "*");
+  assert.ok(h.get("Access-Control-Expose-Headers").includes("Content-Type"));
+});
+
+test("the preflight contract matches Synapse's", () => {
+  const c = corsHeaders();
+  assert.ok(c["Access-Control-Allow-Headers"].includes("Authorization"),
+    "a client that cannot send Authorization cannot fetch authenticated media at all");
+  assert.ok(c["Access-Control-Allow-Methods"].includes("GET"));
 });

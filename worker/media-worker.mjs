@@ -104,14 +104,39 @@ export function responseHeaders(upstreamHeaders, _kind) {
   const inlineSafe = /^(image\/(jpeg|png|gif|webp|apng|avif)|video\/(mp4|webm|ogg)|audio\/(mp4|webm|ogg|mpeg|flac|wave?))$/.test(type);
   h.set("Content-Disposition", inlineSafe ? "inline" : "attachment");
   h.set("X-Content-Type-Options", "nosniff");
+  for (const [k, v] of Object.entries(corsHeaders())) h.set(k, v);
   return h;
+}
+
+/**
+ * CORS, copied from what Synapse answers on the same paths.
+ *
+ * Not optional and not cosmetic. Every Matrix client that is not served from
+ * the homeserver's own origin -- Technetium on localhost, any third-party
+ * client -- reads media with a cross-origin fetch carrying an Authorization
+ * header, which browsers preflight. Intercepting these paths without answering
+ * CORS breaks those clients completely while leaving Element (same-origin,
+ * no preflight) working perfectly, so the breakage is invisible from the one
+ * client most likely to be tested.
+ *
+ * `*` rather than echoing the Origin is what Synapse does and is safe here:
+ * these responses are authorized by the Authorization header, never by a
+ * cookie, so no browser will attach ambient credentials to them.
+ */
+export function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type, Authorization, Date",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Type, Content-Disposition",
+  };
 }
 
 /** A Matrix-shaped error, so clients read it the way they read Synapse's. */
 export function deny(status, errcode, error) {
   return new Response(JSON.stringify({ errcode, error }), {
     status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...corsHeaders() },
   });
 }
 
@@ -122,6 +147,14 @@ export default {
 
     // Not a media path -> not ours. Hand it to the origin untouched.
     if (!parsed) return fetch(request);
+
+    // Preflight. A cross-origin client sending Authorization gets one of these
+    // FIRST, and it carries no token -- so it must be answered before any
+    // authorization check, or every non-same-origin client fails with an
+    // opaque "CORS request did not succeed" and never sends the real request.
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: { ...corsHeaders(), "Access-Control-Max-Age": "86400" } });
+    }
 
     const authorization = request.headers.get("Authorization");
     if (!authorization) return deny(401, "M_MISSING_TOKEN", "Missing access token");
