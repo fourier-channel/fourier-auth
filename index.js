@@ -303,7 +303,12 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // that the user can see the room this mxc lives in (MSC3916 scoping). Enforce
   // it here -- allow only if the token's owner is joined to a room containing
   // this media. Fail closed. Applies to BOTH bearer (client) and cookie (booru).
-  const allowed = await checkMediaAccess(token, serverName, mediaId);
+  // ?room_id= is the client saying which room it is rendering. It only ever
+  // WIDENS access for media the server cannot see into (encrypted rooms), and
+  // only when the caller is genuinely joined to the room named -- see
+  // mediaauth.js for why knowing the mxc is itself evidence of membership.
+  const roomId = typeof req.query.room_id === "string" ? req.query.room_id : undefined;
+  const allowed = await checkMediaAccess(token, serverName, mediaId, { roomId });
   if (!allowed) {
     return res.status(403).json({ error: "not authorized for this media" });
   }

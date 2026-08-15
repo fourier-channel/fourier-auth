@@ -183,7 +183,24 @@ async function getJoinedRooms(token) {
  * Both fail closed. There is no third answer and no fallback: a denial here is
  * final, and nothing else on this box will serve the bytes instead.
  */
-async function checkMediaAccess(token, serverName, mediaId) {
+/**
+ * Is this room encrypted? The hint below is only trusted for rooms that are.
+ */
+async function isEncryptedRoom(roomId) {
+  const cacheKey = "encrypted:" + roomId;
+  const cached = await cacheGetJson(cacheKey).catch(() => null);
+  if (cached !== null && cached !== undefined) return cached.v;
+  const { rows } = await pool.query(
+    `select 1 from current_state_events
+      where room_id = $1 and type = 'm.room.encryption' and state_key = '' limit 1`,
+    [roomId]
+  );
+  const yes = rows.length > 0;
+  await cacheSetJson(cacheKey, { v: yes }, MEDIA_ROOMS_TTL).catch(() => {});
+  return yes;
+}
+
+async function checkMediaAccess(token, serverName, mediaId, opts = {}) {
   const mxc = `mxc://${serverName}/${mediaId}`;
   try {
     if (await isSiteAsset(mxc)) {
@@ -196,13 +213,32 @@ async function checkMediaAccess(token, serverName, mediaId) {
       resolveMediaRooms(mxc),
       getJoinedRooms(token),
     ]);
-    if (mediaRooms.length === 0 || joinedRooms.length === 0) return false;
+    if (joinedRooms.length === 0) return false;
     const joinedSet = new Set(joinedRooms);
-    return mediaRooms.some((r) => joinedSet.has(r));
+    if (mediaRooms.length > 0) return mediaRooms.some((r) => joinedSet.has(r));
+
+    // ENCRYPTED ROOMS. The mxc lives inside the encrypted payload, so the
+    // server cannot see which room it belongs to and resolveMediaRooms returns
+    // nothing -- for 261 of this server's media. Fail-closed would deny every
+    // image in every encrypted room forever.
+    //
+    // The client tells us which room it is viewing, and we check membership of
+    // THAT room. What makes this sound rather than a client-supplied bypass is
+    // that knowing the mxc is itself evidence: it only appears in ciphertext,
+    // so the only way to have learned it is to have decrypted the event, which
+    // requires the room keys, which require having been in the room.
+    //
+    // Restricted to rooms that are ACTUALLY encrypted. In a cleartext room the
+    // server can see the media, so an unresolvable mxc there is not an
+    // encryption artefact -- it is media that was never posted, and a hint must
+    // not launder it into an allow.
+    const roomId = opts.roomId;
+    if (!roomId || !joinedSet.has(roomId)) return false;
+    return await isEncryptedRoom(roomId);
   } catch (err) {
     console.error("[mediaauth] check failed (fail-closed):", err.code || err.message);
     return false;
   }
 }
 
-module.exports = { checkMediaAccess, resolveMediaRooms, getJoinedRooms, isSiteAsset, tokenIsOurs };
+module.exports = { checkMediaAccess, resolveMediaRooms, getJoinedRooms, isSiteAsset, tokenIsOurs, isEncryptedRoom };

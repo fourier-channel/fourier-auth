@@ -55,6 +55,11 @@ export function authUrl(base, { serverName, mediaId, kind }, searchParams) {
     if (w) u.searchParams.set("w", w);
     if (h) u.searchParams.set("h", h);
   }
+  // The room the client is rendering. Forwarded, never invented: it is the only
+  // way media inside an encrypted room can be authorized at all, since the
+  // server cannot see which room such an mxc belongs to.
+  const roomId = searchParams.get("room_id");
+  if (roomId) u.searchParams.set("room_id", roomId);
   return u.toString();
 }
 
@@ -138,6 +143,19 @@ export function corsHeaders() {
   };
 }
 
+/**
+ * Cache key for one authorization decision.
+ *
+ * The credential is HASHED, never stored: the key must distinguish two users
+ * asking about the same object, without putting an access token into a cache
+ * that outlives the request. Same media, same room hint, same user -> same key.
+ */
+async function decisionKey(authzUrl, credential) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(credential || ""));
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return new Request(`https://authz.fourier.internal/${hex}/${encodeURIComponent(authzUrl)}`, { method: "GET" });
+}
+
 /** A Matrix-shaped error, so clients read it the way they read Synapse's. */
 export function deny(status, errcode, error) {
   return new Response(JSON.stringify({ errcode, error }), {
@@ -175,11 +193,42 @@ export default {
     const cookie = request.headers.get("Cookie");
     if (!authorization && !cookie) return deny(401, "M_MISSING_TOKEN", "Missing access token");
 
-    const decision = await resolveUpstream(
-      fetch,
-      authUrl(env.FOURIER_AUTH_BASE, parsed, url.searchParams),
-      { authorization, cookie },
-    );
+    // Cache the DECISION at the edge, not just the bytes.
+    //
+    // Every image was paying a round trip from the Cloudflare edge to Hetzner
+    // to re-ask a question whose answer had not changed -- about half the warm
+    // latency of a media load, on every image, forever.
+    //
+    // I originally refused to cache this on the grounds that "a cached
+    // authorization is a user who left a room still reading it". That was
+    // incomplete: fourier-auth already caches joined-rooms for five minutes, so
+    // that window exists whether or not the edge caches anything. Operator
+    // ruling 2026-08-16: "Cached is cached. If the user could see it before,
+    // continuing to allow them to see it for another 5 minutes is harmless."
+    //
+    // 240s, not 300: the decision carries a presigned URL that fourier-auth
+    // mints for 300s, so a shorter TTL guarantees at least 60s of life left on
+    // any URL served from cache. Handing out a credential about to expire is
+    // the failure the old client's REUSE_MARGIN_MS existed to avoid.
+    //
+    // ALLOWS ONLY. A cached denial would lock a user out of a room they just
+    // joined for the rest of the window, and denials are cheap to re-ask.
+    const authzUrl = authUrl(env.FOURIER_AUTH_BASE, parsed, url.searchParams);
+    const cache = caches.default;
+    const authzKey = await decisionKey(authzUrl, authorization || cookie);
+
+    let decision;
+    const cachedDecision = await cache.match(authzKey);
+    if (cachedDecision) {
+      decision = await cachedDecision.json();
+    } else {
+      decision = await resolveUpstream(fetch, authzUrl, { authorization, cookie });
+      if (decision.ok) {
+        ctx.waitUntil(cache.put(authzKey, new Response(JSON.stringify(decision), {
+          headers: { "Content-Type": "application/json", "Cache-Control": "max-age=240" },
+        })));
+      }
+    }
     // Kept, not temporary. A Worker that authorizes NOTHING looked exactly like
     // one that was working, because the origin served everything it refused --
     // which is how this shipped "verified" and was not. No token material is
@@ -211,7 +260,6 @@ export default {
     // authorized users share one cached copy and an unauthorized one never
     // reaches this line.
     const cacheKey = new Request(decision.url.split("?")[0], { method: "GET" });
-    const cache = caches.default;
     let upstream = await cache.match(cacheKey);
     if (!upstream) {
       upstream = await fetch(decision.url);

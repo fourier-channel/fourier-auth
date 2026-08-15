@@ -156,3 +156,16 @@ test("the old string signature still works", async () => {
   await resolveUpstream(fake, "u", "Bearer t");
   assert.equal(seen.Authorization, "Bearer t");
 });
+
+test("the room hint is forwarded for both kinds, never invented", () => {
+  const q = new URLSearchParams("width=320&room_id=%21abc%3A41chan.net")
+  const t = new URL(authUrl("https://mxc", { serverName: "41chan.net", mediaId: "m", kind: "thumbnail" }, q))
+  assert.equal(t.searchParams.get("room_id"), "!abc:41chan.net")
+  // An original carries no size but still needs the hint: encrypted media is
+  // encrypted whether you are asking for a thumbnail or the full image.
+  const d = new URL(authUrl("https://mxc", { serverName: "41chan.net", mediaId: "m", kind: "download" }, q))
+  assert.equal(d.searchParams.get("room_id"), "!abc:41chan.net")
+  // Absent stays absent.
+  const n = new URL(authUrl("https://mxc", { serverName: "41chan.net", mediaId: "m", kind: "download" }, new URLSearchParams()))
+  assert.equal(n.searchParams.get("room_id"), null)
+});
