@@ -82,7 +82,7 @@ export async function resolveUpstream(fetchImpl, url, authorization) {
 }
 
 /** Headers to hand the client. The presigned URL is never among them. */
-export function responseHeaders(upstreamHeaders, kind) {
+export function responseHeaders(upstreamHeaders, _kind) {
   const h = new Headers();
   const ct = upstreamHeaders.get("content-type");
   if (ct) h.set("Content-Type", ct);
@@ -91,9 +91,18 @@ export function responseHeaders(upstreamHeaders, kind) {
   // Content-addressed and immutable, and private because it is authorized per
   // user -- the same header the origin sets for the same reason.
   h.set("Cache-Control", "private, max-age=31536000, immutable");
-  // Matrix clients render media inline; the spec requires this on media
-  // responses so a malicious upload cannot be served as an active document.
-  h.set("Content-Disposition", kind === "thumbnail" ? "inline" : "attachment");
+  // Decided by CONTENT TYPE, not by which endpoint was called -- which is what
+  // the spec (MSC2702) says and what Synapse does. Serving every download as
+  // an attachment would have been a behaviour change on the one path that
+  // carries all of Element's media, for no reason: a thumbnail and an original
+  // of the same PNG are equally safe to render.
+  //
+  // The allowlist is the point. Anything not on it is forced to download rather
+  // than being rendered as an active document, so an uploaded .html cannot
+  // execute in the origin of whoever opens it.
+  const type = (ct || "").split(";")[0].trim().toLowerCase();
+  const inlineSafe = /^(image\/(jpeg|png|gif|webp|apng|avif)|video\/(mp4|webm|ogg)|audio\/(mp4|webm|ogg|mpeg|flac|wave?))$/.test(type);
+  h.set("Content-Disposition", inlineSafe ? "inline" : "attachment");
   h.set("X-Content-Type-Options", "nosniff");
   return h;
 }

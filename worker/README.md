@@ -40,11 +40,21 @@ Anything it does not recognise, or cannot get an answer for, is passed to the
 origin untouched. A broken image for every user is worse than one byte crossing
 the host, so the failure mode is the old behaviour, not an error.
 
-## Deploying it
+## Deployed
 
-**Not deployed.** The Cloudflare token on 41chan (`FS_CF_API_TOKEN`) is the R2
-cost-meter token: it answers `Authentication error` on the Workers and R2 APIs
-and returns an empty zone list. Deploying needs a token with:
+Live since 2026-08-15, version `0bc7e167`, on
+`matrix.41chan.net/_matrix/client/v1/media/*`.
+
+Verified by measuring the thing that matters rather than the status code: five
+authenticated fetches returned 200 with bytes identical to the uploaded
+original, and **Synapse's own media request count did not move** -- it served
+none of them. Unauthenticated, bogus and wrong-kind tokens all get 401;
+`/_matrix/client/versions`, `/_matrix/client/v1/media/config` and the admin
+route are untouched.
+
+The deploy token is at `worker/.env` (gitignored, 0600). It is an OPERATOR
+credential -- it can push code to the zone -- and is never loaded by the running
+service. Scopes it needs:
 
 | scope | why |
 |---|---|
@@ -56,7 +66,13 @@ presigned URL fourier-auth mints, and it attaches to a hostname that already
 exists.
 
     cd /opt/fourier/auth/worker
-    CLOUDFLARE_API_TOKEN=... npx wrangler deploy
+    set -a; . ./.env; set +a
+    export CLOUDFLARE_ACCOUNT_ID=$(grep -oP '(?<=^FS_CF_ACCOUNT_ID=).*' /etc/fourier-sampling/env)
+    npx wrangler deploy
+
+To roll back, delete the route in the Cloudflare dashboard or
+`npx wrangler delete` -- Synapse serves the same paths the moment the Worker is
+gone, so the fallback is the pre-change behaviour rather than an outage.
 
 ## Verifying it after deploy
 
@@ -73,7 +89,7 @@ the Worker is not intercepting and everything is falling through to the origin.
 
     node --test media-worker.test.mjs
 
-Ten tests over the pure decision logic: path recognition, the URL it asks
+Eleven tests over the pure decision logic: path recognition, the URL it asks
 fourier-auth, how it reads the answer, and what it hands the client. They run
 without Cloudflare, which is the point -- the logic was not going to ship on
 faith just because it could not be deployed from here.

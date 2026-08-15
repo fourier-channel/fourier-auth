@@ -72,14 +72,31 @@ test("client headers never carry the presigned URL, and mark media inert", () =>
   assert.equal(h.get("Content-Type"), "image/png");
   assert.equal(h.get("Cache-Control"), "private, max-age=31536000, immutable");
   assert.equal(h.get("X-Content-Type-Options"), "nosniff");
-  assert.equal(h.get("Content-Disposition"), "attachment");
+  // image/png is inline: safe to render, and forcing a download would be a
+  // behaviour change against Synapse. The disposition rule is pinned by its
+  // own tests below.
+  assert.equal(h.get("Content-Disposition"), "inline");
   // Nothing from R2 is forwarded blind.
   assert.equal(h.get("location"), null);
   assert.equal(h.get("x-amz-request-id"), null);
 });
 
-test("thumbnails render inline, originals download", () => {
-  const up = new Headers({ "content-type": "image/png" });
-  assert.equal(responseHeaders(up, "thumbnail").get("Content-Disposition"), "inline");
-  assert.equal(responseHeaders(up, "download").get("Content-Disposition"), "attachment");
+test("disposition follows the CONTENT TYPE, not the endpoint", () => {
+  // An original and a thumbnail of the same PNG are equally safe to render.
+  for (const kind of ["thumbnail", "download"]) {
+    assert.equal(responseHeaders(new Headers({ "content-type": "image/png" }), kind).get("Content-Disposition"), "inline");
+    assert.equal(responseHeaders(new Headers({ "content-type": "image/svg+xml" }), kind).get("Content-Disposition"), "attachment");
+  }
+});
+
+test("only a known-inert allowlist renders inline", () => {
+  const d = (ct) => responseHeaders(new Headers({ "content-type": ct }), "download").get("Content-Disposition");
+  for (const ok of ["image/png", "image/jpeg", "image/gif", "image/webp", "video/mp4", "audio/ogg", "image/png; charset=binary"]) {
+    assert.equal(d(ok), "inline", ok);
+  }
+  // The ones that matter: an uploaded document must not execute in the origin
+  // of whoever opens it.
+  for (const bad of ["text/html", "image/svg+xml", "application/pdf", "text/javascript", "application/xhtml+xml", ""]) {
+    assert.equal(d(bad), "attachment", bad || "<none>");
+  }
 });
