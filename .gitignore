@@ -5,3 +5,9 @@ config.yaml
 *.local
 *.bak
 *.bak.*
+
+# CLAUDE.md is canon for a PUBLIC repo, so it lives in fourier-basis
+# (docs/claude/CLAUDE-fourier-auth.md) and is hydrated here as a local, ignored
+# file. A public repo carrying one in-tree is a policy breach; this is the
+# guard technetium has had since 2026-08-25 and chanbooru did not.
+CLAUDE.md
