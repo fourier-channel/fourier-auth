@@ -1,3 +1,7 @@
+<!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-auth/DEVLOG.md
+     Edit canon and run `coherence hydrate`, never this delivered copy.
+     An edit here is drift: hydration will refuse to overwrite it and the
+     doc axis reports it edited-in-place until someone promotes or discards it. -->
 # Fourier — Auth (Matrix-Gated Media Proxy) Dev Log
 
 **Project:** Fourier · **Component:** Auth (platform-gated media auth & token broker)
