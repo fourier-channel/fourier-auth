@@ -17,7 +17,13 @@ function identityForSession(session) {
 // Build the Express handler, with getSession + cookieName injected so it is
 // testable without Redis or a live server. A getSession failure resolves to
 // "anonymous" (204, no header) rather than blocking the request.
-function makeVerifyHandler({ getSession, cookieName }) {
+//
+// `sessionInfo` (optional): async (sid, session) -> a JSON-able object for
+// the X-Fourier-Session-Info header, or null. This is the session bar's
+// evidence line -- expiry, the previous session's digest and end -- and it
+// is strictly a bonus: any failure there leaves the identity standing and
+// the info header absent, never the reverse.
+function makeVerifyHandler({ getSession, cookieName, sessionInfo }) {
   return async function verifyHandler(req, res) {
     const sid = req.cookies ? req.cookies[cookieName] : undefined;
     let session = null;
@@ -27,7 +33,19 @@ function makeVerifyHandler({ getSession, cookieName }) {
       session = null;
     }
     const identity = identityForSession(session);
-    if (identity) res.set("X-Fourier-Identity", identity);
+    if (identity) {
+      res.set("X-Fourier-Identity", identity);
+      if (sessionInfo) {
+        try {
+          const info = await sessionInfo(sid, session);
+          if (info && Object.keys(info).length) {
+            res.set("X-Fourier-Session-Info", JSON.stringify(info));
+          }
+        } catch (e) {
+          // The identity stands; the info line is a bonus, never a blocker.
+        }
+      }
+    }
     return res.status(204).end();
   };
 }

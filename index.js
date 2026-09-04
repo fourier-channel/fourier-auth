@@ -4,7 +4,7 @@ const cookieParser = require("cookie-parser");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createSession, getSession, destroySession, redisPing,
-        putOidcState, takeOidcState, cacheGetJson, cacheSetJson } = require("./session");
+        putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
 const { checkMediaAccess } = require("./mediaauth");
 const { makeVerifyHandler } = require("./verify");
@@ -174,7 +174,28 @@ app.options("/media/:serverName/:mediaId", (req, res) => {
 // nginx auth_request identity resolver: fourier_session cookie -> verified MXID
 // in the X-Fourier-Identity header. Always 2xx so auth_request never blocks a
 // public page (see verify.js). Reuses the existing getSession + COOKIE_NAME.
-app.get("/verify", makeVerifyHandler({ getSession, cookieName: COOKIE_NAME }));
+app.get("/verify", makeVerifyHandler({
+  getSession,
+  cookieName: COOKIE_NAME,
+  // The session bar's evidence: real expiry from Redis PTTL (there is no
+  // refresh -- sessions live a fixed TTL, so no refresh_at is published and
+  // none is invented) plus the user's previous session, recorded at logout.
+  sessionInfo: async (sid, session) => {
+    const [ttl, prev] = await Promise.all([
+      sessionTtlRemaining(sid),
+      getPreviousSession(session.matrixUserId),
+    ]);
+    const now = Math.floor(Date.now() / 1000);
+    const info = {};
+    if (session.createdAt) info.created_at = Math.floor(session.createdAt / 1000);
+    if (ttl != null) info.expires_at = now + ttl;
+    if (prev && prev.digest) {
+      info.previous_digest = prev.digest;
+      info.previous_ended_at = Math.floor((prev.endedAt || 0) / 1000);
+    }
+    return info;
+  },
+}));
 
 // --- booru-native media ----------------------------------------------------
 //

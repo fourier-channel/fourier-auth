@@ -62,3 +62,50 @@ test("SAFETY: getSession throwing still returns 204 with no header (never blocks
   assert.equal(res._status, 204);
   assert.equal("x-fourier-identity" in res._headers, false);
 });
+
+test("session info: emitted beside the identity when the dep delivers", async () => {
+  const handler = makeVerifyHandler({
+    getSession: async () => ({ matrixUserId: "@alice:41chan.net", createdAt: 1000 }),
+    cookieName: "fourier_session",
+    sessionInfo: async (sid, session) => ({ expires_at: 123, previous_digest: "abcd1234", previous_ended_at: 99 }),
+  });
+  const res = await run(handler, { cookies: { fourier_session: "sid1" } });
+  assert.equal(res._status, 204);
+  assert.equal(res._headers["x-fourier-identity"], "@alice:41chan.net");
+  assert.deepEqual(JSON.parse(res._headers["x-fourier-session-info"]), {
+    expires_at: 123, previous_digest: "abcd1234", previous_ended_at: 99,
+  });
+});
+
+test("session info: never emitted for an anonymous request", async () => {
+  const handler = makeVerifyHandler({
+    getSession: async () => null,
+    cookieName: "fourier_session",
+    sessionInfo: async () => ({ expires_at: 123 }),
+  });
+  const res = await run(handler, { cookies: { fourier_session: "dead" } });
+  assert.equal("x-fourier-session-info" in res._headers, false);
+  assert.equal("x-fourier-identity" in res._headers, false);
+});
+
+test("session info: a throwing dep leaves the identity standing, info absent", async () => {
+  const handler = makeVerifyHandler({
+    getSession: async () => ({ matrixUserId: "@alice:41chan.net" }),
+    cookieName: "fourier_session",
+    sessionInfo: async () => { throw new Error("redis died"); },
+  });
+  const res = await run(handler, { cookies: { fourier_session: "sid1" } });
+  assert.equal(res._status, 204);
+  assert.equal(res._headers["x-fourier-identity"], "@alice:41chan.net");
+  assert.equal("x-fourier-session-info" in res._headers, false);
+});
+
+test("session info: an empty object emits no header", async () => {
+  const handler = makeVerifyHandler({
+    getSession: async () => ({ matrixUserId: "@alice:41chan.net" }),
+    cookieName: "fourier_session",
+    sessionInfo: async () => ({}),
+  });
+  const res = await run(handler, { cookies: { fourier_session: "sid1" } });
+  assert.equal("x-fourier-session-info" in res._headers, false);
+});

@@ -57,10 +57,53 @@ async function getSession(sid) {
   }
 }
 
-// Destroy a session (logout).
+// Destroy a session (logout). Before the delete, the session is read so the
+// user's "previous session" record can be written -- the session bar's
+// "your previous token was X and it ended #s ago" line is that record.
 async function destroySession(sid) {
   if (!sid) return;
+  let session = null;
+  try { session = await getSession(sid); } catch (e) { session = null; }
   await redis.del(KEY_PREFIX + sid);
+  if (session && session.matrixUserId) {
+    try { await notePreviousSession(session.matrixUserId, sid); } catch (e) {
+      // The logout stands either way; the record is a courtesy to the bar.
+    }
+  }
+}
+
+// 8-hex sha256 of a session id: the digest the session bar compares tokens
+// by. It matches what chanbooru computes over the cookie value -- the cookie
+// IS the sid -- so previous and current read on one scale.
+function sessionDigest(sid) {
+  return crypto.createHash("sha256").update(String(sid)).digest("hex").slice(0, 8);
+}
+
+const PREV_PREFIX = "prevsession:";
+const PREV_TTL = 30 * 24 * 3600; // the bar only ever shows the latest one
+
+// Record that a user's session ended. Digest only: the sid itself is dead
+// and stays unstored. Written on explicit logout and never on natural TTL
+// expiry (Redis gives no hook), which the consumer must not assume otherwise.
+async function notePreviousSession(matrixUserId, sid) {
+  if (!matrixUserId || !sid) return;
+  const payload = JSON.stringify({ digest: sessionDigest(sid), endedAt: Date.now() });
+  await redis.set(PREV_PREFIX + matrixUserId, payload, "EX", PREV_TTL);
+}
+
+async function getPreviousSession(matrixUserId) {
+  if (!matrixUserId) return null;
+  const raw = await redis.get(PREV_PREFIX + matrixUserId);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+// Remaining lifetime of a session in whole seconds, or null when unknowable.
+// Real PTTL, not createdAt arithmetic: the truth is what Redis will do.
+async function sessionTtlRemaining(sid) {
+  if (!sid) return null;
+  const ms = await redis.pttl(KEY_PREFIX + sid);
+  return ms > 0 ? Math.round(ms / 1000) : null;
 }
 
 // For health checks: confirm Redis connectivity.
@@ -94,4 +137,4 @@ async function takeOidcState(state) {
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
 
-module.exports = { createSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson };
+module.exports = { createSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson, sessionDigest, notePreviousSession, getPreviousSession, sessionTtlRemaining };
