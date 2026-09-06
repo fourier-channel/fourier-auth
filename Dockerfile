@@ -11,6 +11,9 @@ RUN npm install --omit=dev
 # the container three times (autotagger.js, release.js, verify.js). Test files are
 # kept out via .dockerignore (*.test.js).
 COPY *.js ./
+# The tracked index declarations: read at startup to verify the live
+# database actually has them (see verifySynapseIndexes).
+COPY db/ ./db/
 
 # The auth service listens on 8010
 EXPOSE 8010

@@ -104,3 +104,24 @@ test("Redis failing is a cache miss, not an outage", async () => {
   assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "abc"), true);
   assert.equal(calls.mediaRooms, 1);
 });
+
+test("declaredIndexNames reads CREATE lines only, never comments", () => {
+  const { declaredIndexNames } = require("./mediaauth-core");
+  const sql = [
+    "-- Idempotent: IF NOT EXISTS makes re-running a no-op.",
+    "CREATE INDEX CONCURRENTLY IF NOT EXISTS event_json_content_url_idx",
+    "  ON event_json ((json::jsonb #>> '{content,url}'));",
+    "CREATE INDEX IF NOT EXISTS events_site_asset_types_idx ON events (type) WHERE type = 'x';",
+    "ANALYZE event_json;",
+  ].join("\n");
+  assert.deepEqual(declaredIndexNames(sql), ["event_json_content_url_idx", "events_site_asset_types_idx"]);
+});
+
+test("the tracked SQL declares the four indexes the gate relies on", () => {
+  const { declaredIndexNames } = require("./mediaauth-core");
+  const fs = require("node:fs");
+  const names = declaredIndexNames(fs.readFileSync(require.resolve("./db/synapse-indexes.sql"), "utf8"));
+  for (const n of ["event_json_content_url_idx", "event_json_content_avatar_url_idx", "event_json_content_thumbnail_url_idx", "events_site_asset_types_idx"]) {
+    assert.ok(names.includes(n), n);
+  }
+});

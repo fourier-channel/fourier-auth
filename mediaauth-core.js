@@ -152,4 +152,15 @@ function createMediaAuth(deps, opts = {}) {
   };
 }
 
-module.exports = { createMediaAuth, MediaAuthUnavailable, TTL };
+// The index names db/synapse-indexes.sql declares, read from the CREATE
+// statements only. Matching "IF NOT EXISTS <word>" anywhere once found the
+// word "makes" inside a comment and reported an index of that name missing.
+function declaredIndexNames(sqlText) {
+  const names = [];
+  const re = /^CREATE INDEX(?: CONCURRENTLY)? IF NOT EXISTS ([a-z_][a-z0-9_]*)/gm;
+  let m;
+  while ((m = re.exec(sqlText)) !== null) names.push(m[1]);
+  return names;
+}
+
+module.exports = { createMediaAuth, MediaAuthUnavailable, TTL, declaredIndexNames };

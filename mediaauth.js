@@ -29,7 +29,9 @@ const { Pool } = require("pg");
 const axios = require("axios");
 const crypto = require("crypto");
 const { cacheGetJson, cacheSetJson } = require("./session");
-const { createMediaAuth, MediaAuthUnavailable } = require("./mediaauth-core");
+const { createMediaAuth, MediaAuthUnavailable, declaredIndexNames } = require("./mediaauth-core");
+const fs = require("fs");
+const path = require("path");
 
 const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 
@@ -136,7 +138,32 @@ const core = createMediaAuth({
   hashToken: (token) => crypto.createHash("sha256").update(token).digest("hex"),
 });
 
+// Does the live database have the indexes this service depends on?
+//
+// Synapse owns that schema and will never create them; a fresh database has
+// none of them and every media check silently becomes a sequential scan --
+// the 2026-09-05 incident, back without a log line to say so. The read-only
+// role cannot create them (tools/ensure-synapse-indexes.sh does, as the DB
+// owner, at deploy), but it CAN see whether they exist, so a fresh box says
+// at boot what would otherwise show up as 5-second thumbnails. Answers the
+// question from pg_index (exists AND valid), never from the file.
+async function verifySynapseIndexes() {
+  const sql = fs.readFileSync(path.join(__dirname, "db", "synapse-indexes.sql"), "utf8");
+  const names = declaredIndexNames(sql);
+  const { rows } = await pool.query(
+    `select c.relname as name, i.indisvalid as valid
+       from pg_index i join pg_class c on c.oid = i.indexrelid
+      where c.relname = any($1)`,
+    [names]
+  );
+  const seen = new Map(rows.map((r) => [r.name, r.valid]));
+  const missing = names.filter((n) => !seen.has(n));
+  const invalid = names.filter((n) => seen.get(n) === false);
+  return { ok: missing.length === 0 && invalid.length === 0, declared: names, missing, invalid };
+}
+
 module.exports = {
+  verifySynapseIndexes,
   checkMediaAccess: core.checkMediaAccess,
   isSiteAsset: core.isSiteAsset,
   resolveMediaRooms: core.resolveMediaRooms,
