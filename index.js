@@ -6,7 +6,7 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
-const { checkMediaAccess, MediaAuthUnavailable } = require("./mediaauth");
+const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes } = require("./mediaauth");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
 const { resolveR2Key } = require("./mediar2");
@@ -441,4 +441,18 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`fourier-auth listening on port ${PORT}`);
+  // Say at boot whether the media gate's indexes exist, rather than letting a
+  // fresh database announce it as 5-second thumbnails and 403s.
+  verifySynapseIndexes().then((r) => {
+    if (r.ok) {
+      console.log(`[mediaauth] synapse indexes present and valid: ${r.declared.join(", ")}`);
+    } else {
+      console.error(
+        `[mediaauth] SYNAPSE INDEXES NOT OK -- missing: [${r.missing.join(", ")}] invalid: [${r.invalid.join(", ")}]. ` +
+        "Media authorization will run as sequential scans. Run tools/ensure-synapse-indexes.sh on the box."
+      );
+    }
+  }).catch((err) => {
+    console.error("[mediaauth] could not verify synapse indexes:", err.code || err.message);
+  });
 });
