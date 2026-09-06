@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { parseBooruFile, pickVariant, booruR2Key } = require("./booru-media");
+const { parseBooruFile, pickVariant, booruR2Key, saveDisposition } = require("./booru-media");
 
 // These guard a string that becomes an R2 object key. The interesting cases are
 // the rejections: this route is reachable by anyone who can reach the gate, and
@@ -85,4 +85,14 @@ test("a variant key is derived, and never lands in the media/ namespace", () => 
 
 test("h is honoured as well as w", () => {
   assert.strictEqual(pickVariant({ h: "720" }).name, "720x720");
+});
+
+test("saveDisposition: dl=1 signs an attachment named by md5.ext; anything else is inline", () => {
+  const parsed = { md5: "142f98626259e188a9e044b8b1d5cdd7", ext: "jpg" };
+  assert.equal(saveDisposition(parsed, { dl: "1" }), 'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
+  assert.equal(saveDisposition(parsed, { dl: 1 }), 'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
+  assert.equal(saveDisposition(parsed, {}), null);
+  assert.equal(saveDisposition(parsed, { dl: "0" }), null);
+  assert.equal(saveDisposition(parsed, { dl: "true" }), null);
+  assert.equal(saveDisposition(parsed, undefined), null);
 });

@@ -10,7 +10,7 @@ const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes } = require
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
 const { resolveR2Key } = require("./mediar2");
-const { parseBooruFile, pickVariant, booruR2Key } = require("./booru-media");
+const { parseBooruFile, pickVariant, booruR2Key, saveDisposition } = require("./booru-media");
 
 const app = express();
 app.use(cookieParser());
@@ -259,6 +259,7 @@ app.get("/booru/:file", async (req, res) => {
 
   // ?w=/?h= mirrors the mxc route, so chanbooru builds both URL shapes alike.
   const variant = pickVariant(req.query);
+  const disposition = saveDisposition(parsed, req.query);
 
   try {
     const cmd = new GetObjectCommand({
@@ -267,6 +268,7 @@ app.get("/booru/:file", async (req, res) => {
       // md5-keyed content is immutable by construction, so a year is safe and
       // saves re-fetching a full original on every view.
       ResponseCacheControl: "private, max-age=31536000, immutable",
+      ...(disposition ? { ResponseContentDisposition: disposition } : {}),
     });
     const signed = await getSignedUrl(s3, cmd, { expiresIn: R2_PRESIGN_TTL });
     // The presigned URL is short-lived, so neither the 302 nor the JSON
