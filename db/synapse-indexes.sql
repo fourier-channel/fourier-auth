@@ -37,3 +37,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS event_json_content_thumbnail_url_idx
 CREATE INDEX CONCURRENTLY IF NOT EXISTS events_site_asset_types_idx
   ON events (type)
   WHERE type IN ('m.room.avatar', 'im.ponies.room_emotes', 'im.ponies.user_emotes', 'm.image_pack');
+
+-- Statistics, or the indexes above are decoration. A freshly built expression
+-- index has NO statistics until the table is analyzed, so the planner guessed
+-- ~1,100 rows per url (actual: 1) and hash-joined by scanning all of events
+-- rather than probing it -- resolveMediaRooms stayed at 30 ms and linear in a
+-- table that only grows, with every index in place. ANALYZE brought it to
+-- 0.8 ms. Autovacuum maintains the statistics from here; this is for the
+-- first run on a fresh database, which is exactly when nobody would think to.
+ANALYZE event_json;
+ANALYZE events;
