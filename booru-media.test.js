@@ -91,6 +91,8 @@ test("saveDisposition: dl=1 signs an attachment named by md5.ext; anything else 
   const parsed = { md5: "142f98626259e188a9e044b8b1d5cdd7", ext: "jpg" };
   assert.equal(saveDisposition(parsed, { dl: "1" }), 'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
   assert.equal(saveDisposition(parsed, { dl: 1 }), 'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
+  // what parseBooruFile actually hands over: ext WITH its dot (this is the shape that shipped "md5..jpg" to R2)
+  assert.equal(saveDisposition(parseBooruFile("142f98626259e188a9e044b8b1d5cdd7.jpg"), { dl: "1" }), 'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
   assert.equal(saveDisposition(parsed, {}), null);
   assert.equal(saveDisposition(parsed, { dl: "0" }), null);
   assert.equal(saveDisposition(parsed, { dl: "true" }), null);

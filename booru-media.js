@@ -87,7 +87,9 @@ function booruR2Key(md5, ext, variant) {
 // media byte touching this host. Absent or any other value: inline.
 function saveDisposition(parsed, query) {
   if (!query || String(query.dl) !== "1") return null;
-  return `attachment; filename="${parsed.md5}.${parsed.ext}"`;
+  // parseBooruFile keeps the leading dot on ext; do not print two.
+  const ext = String(parsed.ext || "").replace(/^\./, "");
+  return `attachment; filename="${parsed.md5}.${ext}"`;
 }
 
 module.exports = {
