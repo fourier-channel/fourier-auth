@@ -19,7 +19,12 @@ PG_DB="${PG_DB:-synapse}"
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SQL="$HERE/db/synapse-indexes.sql"
 
-names=$(grep -oE 'IF NOT EXISTS [a-z_]+' "$SQL" | awk '{print $4}')
+# Names come from the CREATE lines only. Matching 'IF NOT EXISTS <word>'
+# anywhere also matched the file's own comment ("IF NOT EXISTS makes
+# re-running a no-op") and reported an index called 'makes' as MISSING --
+# the check failing closed on its first run, correctly, for the wrong reason.
+names=$(grep -oE '^CREATE INDEX CONCURRENTLY IF NOT EXISTS [a-z_]+' "$SQL" | awk '{print $NF}')
+[ -n "$names" ] || { echo "no CREATE INDEX statements found in $SQL"; exit 2; }
 
 if [ "${1:-}" != "--check" ]; then
   # Autocommit, one statement at a time: CONCURRENTLY refuses a transaction.
