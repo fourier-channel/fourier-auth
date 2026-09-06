@@ -8,6 +8,11 @@ const { createSession, getSession, destroySession, redisPing,
 const { getProvider } = require("./providers");
 const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
+// Wiring, asserted at boot: the first deploy of /exchange answered every
+// request 503 "whoamiUser is not a function" because the helper had been
+// added to an internal deps object in mediaauth.js instead of its exports.
+// A missing export is a boot failure here, not a 503 for verification to find.
+if (typeof whoamiUser !== "function") throw new Error("mediaauth must export whoamiUser");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
 const { resolveR2Key } = require("./mediar2");

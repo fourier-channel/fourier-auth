@@ -143,7 +143,6 @@ const core = createMediaAuth({
   queryMediaRooms,
   queryIsEncrypted,
   whoamiOk,
-  whoamiUser,
   fetchJoinedRooms,
   cacheGet: cacheGetJson,
   cacheSet: cacheSetJson,
@@ -182,5 +181,6 @@ module.exports = {
   getJoinedRooms: core.getJoinedRooms,
   isEncryptedRoom: core.isEncryptedRoom,
   tokenIsOurs: whoamiOk,
+  whoamiUser,
   MediaAuthUnavailable,
 };
