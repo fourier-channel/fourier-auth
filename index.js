@@ -6,7 +6,7 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
-const { checkMediaAccess } = require("./mediaauth");
+const { checkMediaAccess, MediaAuthUnavailable } = require("./mediaauth");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
 const { resolveR2Key } = require("./mediar2");
@@ -329,7 +329,19 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // only when the caller is genuinely joined to the room named -- see
   // mediaauth.js for why knowing the mxc is itself evidence of membership.
   const roomId = typeof req.query.room_id === "string" ? req.query.room_id : undefined;
-  const allowed = await checkMediaAccess(token, serverName, mediaId, { roomId });
+  let allowed;
+  try {
+    allowed = await checkMediaAccess(token, serverName, mediaId, { roomId });
+  } catch (err) {
+    if (!(err instanceof MediaAuthUnavailable)) throw err;
+    // The gate could not be consulted. That is not "forbidden": the edge
+    // renders 503 as an uncached 502 and the client retries with backoff.
+    // Before this, a pool timeout was answered 403 -- final, and wrong -- 105
+    // times a day (2026-09-05).
+    console.error("[media] authorization unavailable:", err.message);
+    res.set("Retry-After", "1");
+    return res.status(503).json({ error: "media authorization temporarily unavailable" });
+  }
   if (!allowed) {
     return res.status(403).json({ error: "not authorized for this media" });
   }
