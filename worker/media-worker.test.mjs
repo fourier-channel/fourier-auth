@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders } from "./media-worker.mjs";
+import { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -194,4 +194,16 @@ test("dl=1 hands the client an attachment named by the file; otherwise inline fo
   assert.equal(responseHeaders(up, "booru", { saveAs: "142f98626259e188a9e044b8b1d5cdd7.jpg" }).get("Content-Disposition"),
     'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
   assert.equal(responseHeaders(up, "booru", { saveAs: 'a"b.jpg' }).get("Content-Disposition"), 'attachment; filename="ab.jpg"');
+});
+
+test("dl=1 on a Matrix download saves as <mediaId>.<ext from type>; thumbnails never save", () => {
+  const dl = new URLSearchParams("dl=1");
+  assert.deepEqual(saveOptions(parseMediaPath("/_matrix/client/v1/media/download/41chan.net/abcDEF"), dl), { saveAs: "abcDEF", extFromType: true });
+  assert.deepEqual(saveOptions(parseMediaPath("/_matrix/client/v1/media/thumbnail/41chan.net/abcDEF"), dl), {});
+  assert.deepEqual(saveOptions(parseBooruPath("/fourier/booru/142f98626259e188a9e044b8b1d5cdd7.jpg"), dl), { saveAs: "142f98626259e188a9e044b8b1d5cdd7.jpg" });
+  assert.deepEqual(saveOptions(parseMediaPath("/_matrix/client/v1/media/download/41chan.net/abcDEF"), new URLSearchParams("")), {});
+  const up = new Headers({ "content-type": "image/png" });
+  assert.equal(responseHeaders(up, "download", { saveAs: "abcDEF", extFromType: true }).get("Content-Disposition"), 'attachment; filename="abcDEF.png"');
+  assert.equal(extensionFor("image/jpeg"), ".jpg");
+  assert.equal(extensionFor("application/octet-stream"), "");
 });

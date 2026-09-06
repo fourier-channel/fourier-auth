@@ -116,6 +116,16 @@ export async function resolveUpstream(fetchImpl, url, credentials) {
   return { ok: true, url: body.url };
 }
 
+/** The file extension a saved copy of this media type should carry. */
+export function extensionFor(type) {
+  const m = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+    "image/avif": ".avif", "image/apng": ".apng", "video/mp4": ".mp4", "video/webm": ".webm",
+    "video/ogg": ".ogv", "audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/flac": ".flac",
+  };
+  return m[type] || "";
+}
+
 /** Headers to hand the client. The presigned URL is never among them. */
 export function responseHeaders(upstreamHeaders, _kind, opts = {}) {
   const h = new Headers();
@@ -139,7 +149,8 @@ export function responseHeaders(upstreamHeaders, _kind, opts = {}) {
   const inlineSafe = /^(image\/(jpeg|png|gif|webp|apng|avif)|video\/(mp4|webm|ogg)|audio\/(mp4|webm|ogg|mpeg|flac|wave?))$/.test(type);
   // Save Image (chanbooru) asks with ?dl=1 and a filename: an anchor's
   // `download` attribute is dropped across origins, a disposition is not.
-  if (opts.saveAs) h.set("Content-Disposition", `attachment; filename="${opts.saveAs.replace(/[^A-Za-z0-9._-]/g, "")}"`);
+  // A Matrix media id has no extension of its own; the type supplies one.
+  if (opts.saveAs) h.set("Content-Disposition", `attachment; filename="${opts.saveAs.replace(/[^A-Za-z0-9._-]/g, "")}${opts.extFromType ? extensionFor(type) : ""}"`);
   else h.set("Content-Disposition", inlineSafe ? "inline" : "attachment");
   h.set("X-Content-Type-Options", "nosniff");
   for (const [k, v] of Object.entries(corsHeaders())) h.set(k, v);
@@ -181,6 +192,18 @@ async function decisionKey(authzUrl, credential) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(credential || ""));
   const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   return new Request(`https://authz.fourier.internal/${hex}/${encodeURIComponent(authzUrl)}`, { method: "GET" });
+}
+
+/**
+ * ?dl=1 on a booru original or a Matrix download: hand the client an
+ * attachment (chanbooru's Save Image; the `download` attribute is dropped
+ * across origins). Thumbnails are never "saved"; a variant is.
+ */
+export function saveOptions(parsed, searchParams) {
+  if (searchParams.get("dl") !== "1") return {};
+  if (parsed.kind === "booru") return { saveAs: parsed.file };
+  if (parsed.kind === "download") return { saveAs: parsed.mediaId, extFromType: true };
+  return {};
 }
 
 /** A Matrix-shaped error, so clients read it the way they read Synapse's. */
@@ -302,8 +325,7 @@ export default {
 
     return new Response(upstream.body, {
       status: 200,
-      headers: responseHeaders(upstream.headers, parsed.kind,
-        parsed.kind === "booru" && url.searchParams.get("dl") === "1" ? { saveAs: parsed.file } : {}),
+      headers: responseHeaders(upstream.headers, parsed.kind, saveOptions(parsed, url.searchParams)),
     });
   },
 };
