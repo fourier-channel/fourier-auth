@@ -27,3 +27,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS event_json_content_avatar_url_idx
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS event_json_content_thumbnail_url_idx
   ON event_json ((json::jsonb #>> '{content,info,thumbnail_url}'));
+
+-- The remaining scan. The room-avatar and emoji-pack branches of isSiteAsset
+-- filter events by type first, and Synapse has no index on events.type, so
+-- each was a full scan of events (220k rows, ~40-80 ms) -- and events only
+-- ever grows, which is how a fix that works today stops working next year.
+-- Partial, over just those rare types: a few hundred rows, not two hundred
+-- thousand.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS events_site_asset_types_idx
+  ON events (type)
+  WHERE type IN ('m.room.avatar', 'im.ponies.room_emotes', 'im.ponies.user_emotes', 'm.image_pack');
