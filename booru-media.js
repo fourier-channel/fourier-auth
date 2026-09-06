@@ -78,4 +78,17 @@ function booruR2Key(md5, ext, variant) {
   return variant ? `variants/${md5}/${variant.name}${variant.ext}` : `media/${md5}${ext}`;
 }
 
-module.exports = { BOORU_VARIANT_SIZES, BOORU_EXTS, parseBooruFile, pickVariant, booruR2Key };
+
+// Save Image asks for `?dl=1`: the same-origin gate URL redirects to a
+// cross-origin presigned R2 URL and browsers drop an anchor's `download`
+// attribute across origins, so without a server-side disposition the link
+// opens the raw image in a tab. Signing Content-Disposition: attachment into
+// the presigned URL makes the browser save it, on every origin, with no
+// media byte touching this host. Absent or any other value: inline.
+function saveDisposition(parsed, query) {
+  if (!query || String(query.dl) !== "1") return null;
+  return `attachment; filename="${parsed.md5}.${parsed.ext}"`;
+}
+
+module.exports = {
+  saveDisposition, BOORU_VARIANT_SIZES, BOORU_EXTS, parseBooruFile, pickVariant, booruR2Key };
