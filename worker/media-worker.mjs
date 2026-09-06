@@ -128,6 +128,7 @@ export function extensionFor(type) {
 
 /** Headers to hand the client. The presigned URL is never among them. */
 export function responseHeaders(upstreamHeaders, _kind, opts = {}) {
+  const cors = corsHeaders(opts.origin, opts.credentialedOrigins);
   const h = new Headers();
   const ct = upstreamHeaders.get("content-type");
   if (ct) h.set("Content-Type", ct);
@@ -153,7 +154,7 @@ export function responseHeaders(upstreamHeaders, _kind, opts = {}) {
   if (opts.saveAs) h.set("Content-Disposition", `attachment; filename="${opts.saveAs.replace(/[^A-Za-z0-9._-]/g, "")}${opts.extFromType ? extensionFor(type) : ""}"`);
   else h.set("Content-Disposition", inlineSafe ? "inline" : "attachment");
   h.set("X-Content-Type-Options", "nosniff");
-  for (const [k, v] of Object.entries(corsHeaders())) h.set(k, v);
+  for (const [k, v] of Object.entries(cors)) h.set(k, v);
   return h;
 }
 
@@ -172,7 +173,25 @@ export function responseHeaders(upstreamHeaders, _kind, opts = {}) {
  * these responses are authorized by the Authorization header, never by a
  * cookie, so no browser will attach ambient credentials to them.
  */
-export function corsHeaders() {
+export function corsHeaders(origin, credentialedOrigins) {
+  // The paragraph above was written when only a Bearer token authorized these
+  // responses. Since the booru route (2026-09-06) a COOKIE does too, and a
+  // page on a sibling 41chan host that fetches with credentials (chanbooru's
+  // error card asking "why did this image fail?") cannot be answered with `*`
+  // -- browsers refuse a wildcard on a credentialed request. So a listed
+  // same-site origin gets itself echoed with credentials allowed; everyone
+  // else keeps the wildcard, exactly as before.
+  const list = Array.isArray(credentialedOrigins) ? credentialedOrigins : [];
+  if (origin && list.includes(origin)) {
+    return {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Credentials": "true",
+      "Vary": "Origin",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "X-Requested-With, Content-Type, Authorization, Date",
+      "Access-Control-Expose-Headers": "Content-Length, Content-Type, Content-Disposition",
+    };
+  }
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
@@ -207,10 +226,10 @@ export function saveOptions(parsed, searchParams) {
 }
 
 /** A Matrix-shaped error, so clients read it the way they read Synapse's. */
-export function deny(status, errcode, error) {
+export function deny(status, errcode, error, cors = corsHeaders()) {
   return new Response(JSON.stringify({ errcode, error }), {
     status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...corsHeaders() },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...cors },
   });
 }
 
@@ -226,8 +245,11 @@ export default {
     // FIRST, and it carries no token -- so it must be answered before any
     // authorization check, or every non-same-origin client fails with an
     // opaque "CORS request did not succeed" and never sends the real request.
+    const origin = request.headers.get("Origin");
+    const credentialed = String(env.CREDENTIALED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const cors = corsHeaders(origin, credentialed);
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { ...corsHeaders(), "Access-Control-Max-Age": "86400" } });
+      return new Response(null, { status: 204, headers: { ...cors, "Access-Control-Max-Age": "86400" } });
     }
 
     // TWO ways to present the same identity, because 41chan is one site with
@@ -241,7 +263,7 @@ export default {
     // what a user may see; it only decides how it proves who they are.
     const authorization = request.headers.get("Authorization");
     const cookie = request.headers.get("Cookie");
-    if (!authorization && !cookie) return deny(401, "M_MISSING_TOKEN", "Missing access token");
+    if (!authorization && !cookie) return deny(401, "M_MISSING_TOKEN", "Missing access token", cors);
 
     // Cache the DECISION at the edge, not just the bytes.
     //
@@ -303,7 +325,7 @@ export default {
       const status = decision.status === 401 || decision.status === 403 ? decision.status : 502;
       return deny(status,
         status === 401 ? "M_UNAUTHORIZED" : status === 403 ? "M_FORBIDDEN" : "M_UNKNOWN",
-        status === 502 ? "Media authorization is unavailable" : "Not authorized for this media");
+        status === 502 ? "Media authorization is unavailable" : "Not authorized for this media", cors);
     }
 
     // Edge cache keyed on the R2 object, NOT on the client's request -- so two
@@ -321,11 +343,11 @@ export default {
     }
     // Authorized, but the object could not be read. Still no origin fallback:
     // the answer is a visible error, not a byte that should not exist.
-    if (!upstream.ok) return deny(502, "M_UNKNOWN", "Media store unavailable");
+    if (!upstream.ok) return deny(502, "M_UNKNOWN", "Media store unavailable", cors);
 
     return new Response(upstream.body, {
       status: 200,
-      headers: responseHeaders(upstream.headers, parsed.kind, saveOptions(parsed, url.searchParams)),
+      headers: responseHeaders(upstream.headers, parsed.kind, { ...saveOptions(parsed, url.searchParams), origin, credentialedOrigins: credentialed }),
     });
   },
 };

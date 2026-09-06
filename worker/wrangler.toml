@@ -20,3 +20,7 @@ zone_name = "41chan.net"
 # Where the authorization decision comes from. Not a secret: it answers only
 # to a valid Matrix token, and holds no credential of its own.
 FOURIER_AUTH_BASE = "https://mxc.41chan.net"
+# Sibling 41chan origins whose credentialed fetches get themselves echoed
+# (with Allow-Credentials) instead of the wildcard. chanbooru's error card
+# asks the Worker why an image failed; without this its answer is always 401.
+CREDENTIALED_ORIGINS = "https://booru.41chan.net,https://tc.41chan.net"

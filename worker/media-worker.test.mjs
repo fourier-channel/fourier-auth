@@ -207,3 +207,19 @@ test("dl=1 on a Matrix download saves as <mediaId>.<ext from type>; thumbnails n
   assert.equal(extensionFor("image/jpeg"), ".jpg");
   assert.equal(extensionFor("application/octet-stream"), "");
 });
+
+test("a listed origin gets credentialed CORS echoed; anyone else keeps the wildcard", () => {
+  const list = ["https://booru.41chan.net", "https://tc.41chan.net"];
+  const echoed = corsHeaders("https://booru.41chan.net", list);
+  assert.equal(echoed["Access-Control-Allow-Origin"], "https://booru.41chan.net");
+  assert.equal(echoed["Access-Control-Allow-Credentials"], "true");
+  assert.equal(echoed["Vary"], "Origin");
+  assert.equal(corsHeaders("https://evil.example", list)["Access-Control-Allow-Origin"], "*");
+  assert.equal(corsHeaders("https://evil.example", list)["Access-Control-Allow-Credentials"], undefined);
+  assert.equal(corsHeaders(null, list)["Access-Control-Allow-Origin"], "*");
+  assert.equal(corsHeaders()["Access-Control-Allow-Origin"], "*");
+  const up = new Headers({ "content-type": "image/png" });
+  assert.equal(responseHeaders(up, "download", { origin: "https://tc.41chan.net", credentialedOrigins: list }).get("Access-Control-Allow-Credentials"), "true");
+  assert.equal(responseHeaders(up, "download", {}).get("Access-Control-Allow-Origin"), "*");
+  assert.equal(deny(403, "M_FORBIDDEN", "no", corsHeaders("https://booru.41chan.net", list)).headers.get("Access-Control-Allow-Origin"), "https://booru.41chan.net");
+});
