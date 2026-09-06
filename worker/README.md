@@ -49,6 +49,15 @@ the host, so the failure mode is the old behaviour, not an error.
 Live since 2026-08-15, version `0bc7e167`, on
 `matrix.41chan.net/_matrix/client/v1/media/*`.
 
+Since 2026-09-06, version `461c78f1`, ALSO on
+`booru.41chan.net/fourier/booru/*` (operator ruling: the presigned X-Amz URL
+the gate 302s to was the same mess on a second surface, now mounted inside
+Technetium). Same shape, cookie-authorized: the Worker asks the gate with
+the reader's `fourier_session` cookie and streams the object; `?dl=1` is
+answered as an attachment named by the file for chanbooru's Save Image.
+Deployed from the box as root with the command below (wrangler 3 via npx;
+nothing is installed in the checkout).
+
 Verified by measuring the thing that matters rather than the status code: five
 authenticated fetches returned 200 with bytes identical to the uploaded
 original, and **Synapse's own media request count did not move** -- it served
