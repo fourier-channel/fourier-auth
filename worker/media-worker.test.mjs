@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders } from "./media-worker.mjs";
+import { parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -168,4 +168,30 @@ test("the room hint is forwarded for both kinds, never invented", () => {
   // Absent stays absent.
   const n = new URL(authUrl("https://mxc", { serverName: "41chan.net", mediaId: "m", kind: "download" }, new URLSearchParams()))
   assert.equal(n.searchParams.get("room_id"), null)
+});
+
+test("recognises exactly the booru original path chanbooru links", () => {
+  assert.deepEqual(parseBooruPath("/fourier/booru/142f98626259e188a9e044b8b1d5cdd7.jpg"),
+    { kind: "booru", file: "142f98626259e188a9e044b8b1d5cdd7.jpg" });
+  assert.equal(parseBooruPath("/fourier/booru/142f98626259e188a9e044b8b1d5cdd7.jpg/../x"), null);
+  assert.equal(parseBooruPath("/fourier/booru/notamd5.jpg"), null);
+  assert.equal(parseBooruPath("/fourier/login"), null);
+  assert.equal(parseBooruPath("/fourier/booru/"), null);
+  assert.equal(parseBooruPath("/_matrix/client/v1/media/download/41chan.net/abc"), null);
+});
+
+test("asks the booru gate with the variant size and never forwards dl", () => {
+  const p = parseBooruPath("/fourier/booru/142f98626259e188a9e044b8b1d5cdd7.jpg");
+  assert.equal(authUrl("https://mxc.41chan.net/", p, new URLSearchParams("w=360&h=360&dl=1")),
+    "https://mxc.41chan.net/booru/142f98626259e188a9e044b8b1d5cdd7.jpg?w=360&h=360");
+  assert.equal(authUrl("https://mxc.41chan.net", p, new URLSearchParams("")),
+    "https://mxc.41chan.net/booru/142f98626259e188a9e044b8b1d5cdd7.jpg");
+});
+
+test("dl=1 hands the client an attachment named by the file; otherwise inline for images", () => {
+  const up = new Headers({ "content-type": "image/jpeg", "content-length": "10" });
+  assert.equal(responseHeaders(up, "booru").get("Content-Disposition"), "inline");
+  assert.equal(responseHeaders(up, "booru", { saveAs: "142f98626259e188a9e044b8b1d5cdd7.jpg" }).get("Content-Disposition"),
+    'attachment; filename="142f98626259e188a9e044b8b1d5cdd7.jpg"');
+  assert.equal(responseHeaders(up, "booru", { saveAs: 'a"b.jpg' }).get("Content-Disposition"), 'attachment; filename="ab.jpg"');
 });

@@ -33,6 +33,20 @@
  * just bytes that are immutable anyway.
  */
 
+/**
+ * Parse a booru-native original path, as chanbooru links them:
+ * /fourier/booru/<md5>.<ext>. Null for anything else. Same fix as the Matrix
+ * path (operator ruling 2026-09-06: the presigned X-Amz URL that the gate
+ * 302s to is the same mess on the second surface, and the booru is now
+ * mounted inside Technetium) -- the URL the reader sees stays this one, the
+ * bytes come from R2 via the edge, 41chan is not in the path.
+ */
+export function parseBooruPath(pathname) {
+  const m = /^\/fourier\/booru\/([0-9a-f]{32}\.[a-z0-9]{1,5})\/?$/i.exec(pathname);
+  if (!m) return null;
+  return { kind: "booru", file: m[1] };
+}
+
 /** Parse a Matrix authenticated-media path. Null for anything else. */
 export function parseMediaPath(pathname) {
   const m = /^\/_matrix\/client\/v1\/media\/(download|thumbnail)\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
@@ -47,7 +61,17 @@ export function parseMediaPath(pathname) {
  * own allowed set -- so the Worker never invents a size and the two cannot
  * disagree about which rendition is correct.
  */
-export function authUrl(base, { serverName, mediaId, kind }, searchParams) {
+export function authUrl(base, { serverName, mediaId, kind, file }, searchParams) {
+  if (kind === "booru") {
+    // The booru gate: cookie-authorized, ?w=/?h= for variants exactly as the
+    // <img> tags ask. `dl` is NOT forwarded -- the disposition is decided
+    // here (see responseHeaders), so one cached authorization serves both.
+    const b = new URL(`${base.replace(/\/+$/, "")}/booru/${encodeURIComponent(file)}`);
+    const w = searchParams.get("w"), h = searchParams.get("h");
+    if (w) b.searchParams.set("w", w);
+    if (h) b.searchParams.set("h", h);
+    return b.toString();
+  }
   const u = new URL(`${base.replace(/\/+$/, "")}/media/${encodeURIComponent(serverName)}/${encodeURIComponent(mediaId)}`);
   if (kind === "thumbnail") {
     const w = searchParams.get("width") || searchParams.get("w");
@@ -93,7 +117,7 @@ export async function resolveUpstream(fetchImpl, url, credentials) {
 }
 
 /** Headers to hand the client. The presigned URL is never among them. */
-export function responseHeaders(upstreamHeaders, _kind) {
+export function responseHeaders(upstreamHeaders, _kind, opts = {}) {
   const h = new Headers();
   const ct = upstreamHeaders.get("content-type");
   if (ct) h.set("Content-Type", ct);
@@ -113,7 +137,10 @@ export function responseHeaders(upstreamHeaders, _kind) {
   // execute in the origin of whoever opens it.
   const type = (ct || "").split(";")[0].trim().toLowerCase();
   const inlineSafe = /^(image\/(jpeg|png|gif|webp|apng|avif)|video\/(mp4|webm|ogg)|audio\/(mp4|webm|ogg|mpeg|flac|wave?))$/.test(type);
-  h.set("Content-Disposition", inlineSafe ? "inline" : "attachment");
+  // Save Image (chanbooru) asks with ?dl=1 and a filename: an anchor's
+  // `download` attribute is dropped across origins, a disposition is not.
+  if (opts.saveAs) h.set("Content-Disposition", `attachment; filename="${opts.saveAs.replace(/[^A-Za-z0-9._-]/g, "")}"`);
+  else h.set("Content-Disposition", inlineSafe ? "inline" : "attachment");
   h.set("X-Content-Type-Options", "nosniff");
   for (const [k, v] of Object.entries(corsHeaders())) h.set(k, v);
   return h;
@@ -167,7 +194,7 @@ export function deny(status, errcode, error) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const parsed = parseMediaPath(url.pathname);
+    const parsed = parseMediaPath(url.pathname) || parseBooruPath(url.pathname);
 
     // Not a media path -> not ours. Hand it to the origin untouched.
     if (!parsed) return fetch(request);
@@ -275,7 +302,8 @@ export default {
 
     return new Response(upstream.body, {
       status: 200,
-      headers: responseHeaders(upstream.headers, parsed.kind),
+      headers: responseHeaders(upstream.headers, parsed.kind,
+        parsed.kind === "booru" && url.searchParams.get("dl") === "1" ? { saveAs: parsed.file } : {}),
     });
   },
 };

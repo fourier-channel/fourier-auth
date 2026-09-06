@@ -6,7 +6,8 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
-const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes } = require("./mediaauth");
+const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
+const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
 const { resolveR2Key } = require("./mediar2");
@@ -154,6 +155,41 @@ app.get("/callback", async (req, res) => {
 });
 
 // Logout
+// --- zero-click booru session from Technetium ---------------------------------
+//
+// Operator ruling 2026-09-06: a user signed into Technetium is signed into
+// the booru mounted inside it, with no popup. Technetium POSTs its Matrix
+// access token here (credentialed, cross-origin, same site); Synapse's whoami
+// proves the token is ours and names the user; the answer is the same
+// fourier_session cookie the OIDC callback sets. The token is never trusted
+// as a string -- see the note above BOORU_MEDIA_REQUIRE_SESSION.
+app.options("/exchange", (req, res) => {
+  const h = exchangeCorsHeaders(req.headers.origin, CLIENT_ORIGINS);
+  if (!h) return res.status(403).end();
+  res.set(h); res.set("Access-Control-Max-Age", "600");
+  res.status(204).end();
+});
+
+app.post("/exchange", async (req, res) => {
+  const h = exchangeCorsHeaders(req.headers.origin, CLIENT_ORIGINS);
+  if (!h) return res.status(403).json({ error: "origin not allowed" });
+  res.set(h);
+  res.set("Cache-Control", "no-store");
+  const token = bearerToken(req.headers.authorization);
+  if (!token) return res.status(401).json({ error: "bearer token required" });
+  let userId;
+  try {
+    userId = await whoamiUser(token);
+  } catch (err) {
+    console.error("[exchange] whoami unavailable:", err.message);
+    return res.status(503).json({ error: "homeserver unavailable" });
+  }
+  if (!userId) return res.status(401).json({ error: "token not recognised by this homeserver" });
+  const sid = await createSession({ matrixUserId: userId, matrixToken: token });
+  res.cookie(COOKIE_NAME, sid, COOKIE_OPTS);
+  res.json({ ok: true, user: userId });
+});
+
 app.post("/logout", async (req, res) => {
   await destroySession(req.cookies[COOKIE_NAME]);
   // Same attributes, or the browser treats it as a different cookie and the

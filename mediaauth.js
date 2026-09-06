@@ -105,6 +105,17 @@ async function queryIsEncrypted(roomId) {
 // Is this token valid on THIS server? The only question a site asset asks.
 // A transport failure throws (Synapse unreachable is not "token invalid");
 // any non-200 is a plain "no".
+// The same question with the answer kept: the user id Synapse binds this
+// token to, or null. Transport failures still throw.
+async function whoamiUser(token) {
+  const r = await axios.get(`${SYNAPSE_URL}/_matrix/client/v3/account/whoami`, {
+    headers: { Authorization: `Bearer ${token}` },
+    validateStatus: () => true,
+    timeout: 5000,
+  });
+  return r.status === 200 && typeof r.data?.user_id === "string" ? r.data.user_id : null;
+}
+
 async function whoamiOk(token) {
   const r = await axios.get(`${SYNAPSE_URL}/_matrix/client/v3/account/whoami`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -132,6 +143,7 @@ const core = createMediaAuth({
   queryMediaRooms,
   queryIsEncrypted,
   whoamiOk,
+  whoamiUser,
   fetchJoinedRooms,
   cacheGet: cacheGetJson,
   cacheSet: cacheSetJson,
