@@ -54,6 +54,21 @@ session sufficient to fetch every image posted in any Matrix room, DMs
 included. Sessions are opaque Redis handles, not signed tokens, so the Worker
 has to ask fourier-auth either way.
 
+## 2026-09-06: both surfaces go through the Worker
+
+The Worker described above has been in front of Matrix media since
+2026-08-15. On 2026-09-06 the operator saw the same X-Amz URL on the booru
+("open image in new tab"), a surface by then mounted inside Technetium, and
+ruled that the same fix applies without being asked: the Worker now also owns
+`booru.41chan.net/fourier/booru/*`. The gate's 302-to-presigned behaviour is
+unchanged and still the fallback if the route is removed; the reader simply
+never sees it, because Cloudflare answers the clean URL with the bytes.
+
+Same day, the booru session became zero-click from Technetium: `POST
+/exchange` with a Bearer Matrix token from a listed client origin, proven by
+Synapse's whoami, sets the same `fourier_session` cookie the OIDC callback
+sets. See the memory `booru-signin-bridge`.
+
 ## Known violations still open (2026-08-15)
 
 Found while reverting an accidental fourth one. None were introduced by that
