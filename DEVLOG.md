@@ -416,3 +416,15 @@ must not be cached and replayed stale).
 
 Open: service token is read-write but only needs read+presign; thumbnail
 egress still proxies; local purge after offload remains unbuilt.
+
+
+## 2026-09-11 -- where the later history lives
+
+This log stops in early July. The changes since are recorded where they
+were made, not here: the 2026-08-15 all-classes-to-R2 release and the
+site-wide cookie (`index.js` header), the booru-native route
+(`booru-media.js`), the 2026-09-06 zero-click `POST /exchange` and the edge
+Worker (`MEDIA-URLS.md`, `worker/README.md`), and the README rewrite of
+2026-09-11 that describes the service as a presigning authorization oracle
+rather than a byte proxy. Two earlier sections here are both numbered 9;
+left as written. Per WORKING-RULES 0.1 this file is history, not state.
