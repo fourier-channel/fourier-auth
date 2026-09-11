@@ -36,13 +36,30 @@ MSC3916 leaves out. Reimplementing that here would be a second copy of the rule
 deciding who may see what -- the most dangerous thing in this system to have two
 of. Only the decision crosses 41chan (a few hundred bytes); the image does not.
 
-Bytes are edge-cached keyed on the R2 object. **Authorization is not cached** --
-every request re-asks. A cached authorization is a user who left a room still
-reading it.
+Bytes are edge-cached keyed on the R2 object, and the cached copy is marked
+public-immutable in Cloudflare's shared cache: two authorized readers share
+one copy, and an unauthorized one never reaches the line that serves it.
+**Allows are cached at the edge for 240 seconds** (operator ruling
+2026-08-16), keyed on a hash of the credential plus the authorization URL;
+denials are never cached. A user who leaves a room can read for at most
+four more minutes.
 
-Anything it does not recognise, or cannot get an answer for, is passed to the
-origin untouched. A broken image for every user is worse than one byte crossing
-the host, so the failure mode is the old behaviour, not an error.
+Only a path the Worker does not recognise is passed to the origin untouched.
+Everything it does recognise fails CLOSED: a denial, an unreachable gate, or
+an R2 miss answers 401, 403 or 502 with no origin fallback. The earlier
+"pass through on doubt" behaviour leaked what fourier-auth denied, and was
+reversed.
+
+Every response carries `X-Content-Type-Options: nosniff` and a
+`Content-Disposition` decided by content type against an inline-safe list,
+so an uploaded HTML file cannot execute in the viewer's origin. The OPTIONS
+preflight is answered before any authorization check. Each decision is
+logged as `{path, kind, ok, authStatus}` with no token material, so a no-op
+Worker cannot look like a working one.
+
+Two non-secret variables shape it: `FOURIER_AUTH_BASE` (where the gate is)
+and `CREDENTIALED_ORIGINS` (sibling origins that get their Origin echoed with
+`Allow-Credentials: true` instead of the wildcard).
 
 ## Deployed
 
@@ -53,8 +70,10 @@ Since 2026-09-06, version `461c78f1`, ALSO on
 `booru.41chan.net/fourier/booru/*` (operator ruling: the presigned X-Amz URL
 the gate 302s to was the same mess on a second surface, now mounted inside
 Technetium). Same shape, cookie-authorized: the Worker asks the gate with
-the reader's `fourier_session` cookie and streams the object; `?dl=1` is
-answered as an attachment named by the file for chanbooru's Save Image.
+the reader's cookies (a Bearer wins when both are present) and streams the
+object; `?dl=1` is answered as an attachment named by the file, on the booru
+route and on Matrix downloads alike. Two further Worker commits landed the
+same day, so the version above is the first of that deploy, not the last.
 Deployed from the box as root with the command below (wrangler 3 via npx;
 nothing is installed in the checkout).
 
@@ -71,8 +90,8 @@ service. Scopes it needs:
 
 | scope | why |
 |---|---|
-| Account · Workers Scripts · Edit | upload the script |
-| Zone · Workers Routes · Edit (41chan.net) | bind it to the media path |
+| Account / Workers Scripts / Edit | upload the script |
+| Zone / Workers Routes / Edit (41chan.net) | bind it to the media path |
 
 No R2 binding and no DNS record are required -- it reaches R2 through the
 presigned URL fourier-auth mints, and it attaches to a hostname that already
@@ -102,7 +121,8 @@ the Worker is not intercepting and everything is falling through to the origin.
 
     node --test media-worker.test.mjs
 
-Eleven tests over the pure decision logic: path recognition, the URL it asks
-fourier-auth, how it reads the answer, and what it hands the client. They run
+Tests over the pure decision logic: path recognition, the URL it asks
+fourier-auth, how it reads the answer, the cache and fail-closed rules, and
+what it hands the client. The count is whatever the command prints. They run
 without Cloudflare, which is the point -- the logic was not going to ship on
 faith just because it could not be deployed from here.
