@@ -1,11 +1,19 @@
 const axios = require("axios");
 const crypto = require("crypto");
+const { clientAuthParams, loadSigningKey } = require("./clientAssertion");
 
 const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 
 const OIDC_ISSUER = process.env.OIDC_ISSUER || "https://auth.41chan.net/";
 const OIDC_CLIENT_ID = process.env.OIDC_CLIENT_ID;
 const OIDC_CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET;
+// Proof of possession instead of a shared secret, when a key is configured.
+// Loaded ONCE at module load: a malformed key should stop the process on the
+// way up with a message naming the fix, not fail every login at 2am with an
+// OpenSSL error code. Null when unset, and then the secret path still runs --
+// see clientAuthParams for why that dual mode exists and when it goes.
+const OIDC_CLIENT_KEY = loadSigningKey();
+const OIDC_CLIENT_KID = process.env.OIDC_CLIENT_KID || undefined;
 const OIDC_REDIRECT_URI = process.env.OIDC_REDIRECT_URI;
 
 const MatrixProvider = {
@@ -96,9 +104,17 @@ const OidcProvider = {
       grant_type: "authorization_code",
       code,
       redirect_uri: OIDC_REDIRECT_URI,
-      client_id: OIDC_CLIENT_ID,
-      client_secret: OIDC_CLIENT_SECRET,
       code_verifier: codeVerifier,
+      // The audience is the token endpoint from discovery, which is already
+      // in hand -- no new configuration, and it cannot drift from where the
+      // request is actually going.
+      ...clientAuthParams({
+        key: OIDC_CLIENT_KEY,
+        clientId: OIDC_CLIENT_ID,
+        clientSecret: OIDC_CLIENT_SECRET,
+        audience: disc.token_endpoint,
+        kid: OIDC_CLIENT_KID,
+      }),
     });
     const tokResp = await axios.post(disc.token_endpoint, body.toString(), {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -150,8 +166,16 @@ const OidcProvider = {
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: OIDC_CLIENT_ID,
-      client_secret: OIDC_CLIENT_SECRET,
+      // A FRESH assertion per request, not a cached one. They are cheap to
+      // make and 60 seconds long; reusing one would be the only way this
+      // could develop a replay problem of its own making.
+      ...clientAuthParams({
+        key: OIDC_CLIENT_KEY,
+        clientId: OIDC_CLIENT_ID,
+        clientSecret: OIDC_CLIENT_SECRET,
+        audience: disc.token_endpoint,
+        kid: OIDC_CLIENT_KID,
+      }),
     });
     const tokResp = await axios.post(disc.token_endpoint, body.toString(), {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },

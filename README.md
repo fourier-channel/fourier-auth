@@ -96,6 +96,34 @@ Identity and sessions: `SYNAPSE_URL`, `HOMESERVER_NAME`, `REDIS_URL`, `PORT`
 `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`,
 `POST_LOGIN_REDIRECT`.
 
+**Client authentication to MAS.** Two ways, and the second is the one to use.
+
+`OIDC_CLIENT_SECRET` is `client_secret_post`: the secret is sent in the body
+of every token request. It is held by two parties, crosses the wire on every
+login and every refresh, is readable by whatever terminates TLS, and has to be
+rotated on both sides at once.
+
+`OIDC_CLIENT_PRIVATE_KEY` is `private_key_jwt` (RFC 7523) and replaces it. A
+PKCS#8 PEM -- literal newlines or `\n`-escaped, both accepted. The service
+signs a 60-second assertion with it; MAS verifies against the matching PUBLIC
+key in its own client config, and never holds a secret at all. Set
+`OIDC_CLIENT_KID` to the key id so MAS can pick from a JWKS with more than one
+key, which is what allows a key roll with no downtime.
+
+When both are set the KEY wins, so a migration cannot silently keep sending
+the secret. When neither is set the service refuses the request with a message
+saying so, rather than sending an unauthenticated one and getting back a
+refusal about something else.
+
+Generate a pair with `node tools/make-client-key.js [kid]`: the private key
+goes to stderr (put it in the offline secrets source), the public JWK to
+stdout (paste into MAS's client block as `jwks`).
+
+Worth knowing: MAS 1.22.0 verifies the assertion by SIGNATURE ONLY -- it reads
+the client id from `sub` and does not enforce `aud`, `exp` or `jti`. The full
+claim set is sent regardless, but the honest statement of the gain is "the
+secret no longer travels", not "assertions cannot be replayed".
+
 Authorization data: `SYNAPSE_DB_HOST`, `SYNAPSE_DB_PORT`, `SYNAPSE_DB_NAME`,
 `SYNAPSE_DB_USER`, `SYNAPSE_DB_PASSWORD`, `SYNAPSE_DB_POOL_MAX`.
 
