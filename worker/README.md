@@ -77,6 +77,14 @@ same day, so the version above is the first of that deploy, not the last.
 Deployed from the box as root with the command below (wrangler 3 via npx;
 nothing is installed in the checkout).
 
+**Deployed 2026-09-19, version `6f57b797`, fourier-auth c0f18fb:** a booru
+request with NO credential is now asked of the gate rather than refused with
+M_MISSING_TOKEN at the edge. Imageboard media is gated by post visibility
+(BOORU_MEDIA_REQUIRE_SESSION=0), and the refusal made every published-thread
+picture 200 at the origin and 401 at the edge for a reader with no session --
+Discord's unfurler included. Matrix media is unchanged. Verified after deploy: the picture answers a cookieless curl and the Discordbot UA
+through the edge; anonymous Matrix media still 401s.
+
 Verified by measuring the thing that matters rather than the status code: five
 authenticated fetches returned 200 with bytes identical to the uploaded
 original, and **Synapse's own media request count did not move** -- it served
