@@ -3,9 +3,15 @@ const axios = require("axios");
 const cookieParser = require("cookie-parser");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const { createSession, getSession, destroySession, redisPing,
+const { makeTokenSource } = require("./tokenRefresh");
+const { createSession, saveSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
+const tokenSource = makeTokenSource({
+  getSession,
+  saveSession,
+  refreshGrant: (rt) => getProvider("oidc").refresh(rt),
+});
 const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // Wiring, asserted at boot: the first deploy of /exchange answered every
@@ -151,7 +157,12 @@ app.get("/callback", async (req, res) => {
     const sid = await createSession({
       matrixUserId: identity.matrixUserId,
       matrixToken: identity.matrixToken,
+      refreshToken: identity.refreshToken,
+      tokenExpiresAt: identity.expiresIn ? Date.now() + identity.expiresIn * 1000 : undefined,
     });
+    // Non-secret, and the one line that says whether MAS gave this session a
+    // way to outlive its first token.
+    console.log(`[oidc] session minted for ${identity.matrixUserId}: refresh token ${identity.refreshToken ? "yes" : "NO"}, token life ${identity.expiresIn || "?"}s`);
     res.cookie(COOKIE_NAME, sid, COOKIE_OPTS);
     res.redirect(POST_LOGIN_REDIRECT);
   } catch (err) {
@@ -356,8 +367,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   if (authz.startsWith("Bearer ")) {
     token = authz.slice(7).trim();
   } else {
-    const session = await getSession(req.cookies[COOKIE_NAME]);
-    if (session) token = session.matrixToken;
+    const sid = req.cookies[COOKIE_NAME];
+    const session = await getSession(sid);
+    // Through the token source, never session.matrixToken directly: the
+    // session outlives its token by a day, and this is where it is renewed.
+    if (session) token = await tokenSource.freshToken(sid, session);
   }
   if (!token) {
     return res.status(401).json({ error: "no valid session or bearer token" });

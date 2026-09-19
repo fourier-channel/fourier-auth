@@ -34,15 +34,28 @@ const KEY_PREFIX = "session:";
 
 // Create a session for a resolved Matrix identity.
 // Stores the token server-side; returns the opaque session id for the cookie.
-async function createSession({ matrixUserId, matrixToken }) {
+async function createSession({ matrixUserId, matrixToken, refreshToken, tokenExpiresAt }) {
   const sid = crypto.randomBytes(32).toString("hex");
   const payload = JSON.stringify({
     matrixUserId,
     matrixToken,
+    // The refresh token and the access token's expiry, so the token can be
+    // renewed for the session's whole life (tokenRefresh.js). Absent on a
+    // session minted from a client's own bearer via /exchange.
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(typeof tokenExpiresAt === "number" ? { tokenExpiresAt } : {}),
     createdAt: Date.now(),
   });
   await redis.set(KEY_PREFIX + sid, payload, "EX", SESSION_TTL);
   return sid;
+}
+
+// Replace a session's stored data IN PLACE, keeping its remaining TTL: a
+// refreshed token does not extend the session, it only keeps it usable.
+// KEEPTTL needs Redis 6.0; the box runs 6.2.
+async function saveSession(sid, session) {
+  if (!sid || !session) return;
+  await redis.set(KEY_PREFIX + sid, JSON.stringify(session), "KEEPTTL");
 }
 
 // Resolve a session id to its stored data, or null if missing/expired.
@@ -137,4 +150,4 @@ async function takeOidcState(state) {
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
 
-module.exports = { createSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson, sessionDigest, notePreviousSession, getPreviousSession, sessionTtlRemaining };
+module.exports = { createSession, saveSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson, sessionDigest, notePreviousSession, getPreviousSession, sessionTtlRemaining };

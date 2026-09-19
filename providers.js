@@ -113,6 +113,10 @@ const OidcProvider = {
       throw e;
     }
     const matrixToken = tokResp.data.access_token;
+    // The REFRESH TOKEN and the access token's life. Dropped until 2026-09-19,
+    // which left every 24-hour session holding a five-minute token.
+    const refreshToken = tokResp.data.refresh_token || null;
+    const expiresIn = Number(tokResp.data.expires_in) || null;
 
     const who = await axios.get(
       `${SYNAPSE_URL}/_matrix/client/v3/account/whoami`,
@@ -129,8 +133,34 @@ const OidcProvider = {
     return {
       matrixUserId: who.data.user_id,
       matrixToken,
+      refreshToken,
+      expiresIn,
       deviceId: who.data.device_id,
     };
+  },
+
+  /**
+   * One refresh_token grant against MAS. Returns MAS's token response
+   * verbatim (access_token, refresh_token -- rotated -- and expires_in).
+   * Throws on anything but 200; the caller decides what a failed refresh
+   * means for the session.
+   */
+  async refresh(refreshToken) {
+    const disc = await discover();
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: OIDC_CLIENT_ID,
+      client_secret: OIDC_CLIENT_SECRET,
+    });
+    const tokResp = await axios.post(disc.token_endpoint, body.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      validateStatus: () => true,
+    });
+    if (tokResp.status !== 200 || !tokResp.data || !tokResp.data.access_token) {
+      throw new Error((tokResp.data && (tokResp.data.error_description || tokResp.data.error)) || `refresh grant -> HTTP ${tokResp.status}`);
+    }
+    return tokResp.data;
   },
 };
 
