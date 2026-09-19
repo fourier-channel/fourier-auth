@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders } from "./media-worker.mjs";
+import { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -223,3 +223,23 @@ test("a listed origin gets credentialed CORS echoed; anyone else keeps the wildc
   assert.equal(responseHeaders(up, "download", {}).get("Access-Control-Allow-Origin"), "*");
   assert.equal(deny(403, "M_FORBIDDEN", "no", corsHeaders("https://booru.41chan.net", list)).headers.get("Access-Control-Allow-Origin"), "https://booru.41chan.net");
 });
+
+test("a request with no credential is refused for Matrix media and asked of the gate for booru media", async () => {
+  // The published thread is read with no session at all, and the booru's post
+  // visibility is the gate for imageboard media (2026-09-18). Refusing before
+  // asking made the same picture 200 at the origin and 401 at the edge.
+  assert.equal(refusesAnonymous(parseMediaPath("/_matrix/client/v1/media/thumbnail/m.example/abc")), true);
+  assert.equal(refusesAnonymous(parseMediaPath("/_matrix/client/v1/media/download/m.example/abc")), true);
+  assert.equal(refusesAnonymous(parseBooruPath("/fourier/booru/" + "a".repeat(32) + ".jpg")), false);
+  // And the gate is asked with NO credential header invented for it.
+  let seen = null;
+  const fake = async (_u, init) => { seen = init.headers; return { status: 200, json: async () => ({ url: "https://r2/x" }) }; };
+  const d = await resolveUpstream(fake, "u", { authorization: null, cookie: null });
+  assert.equal(d.ok, true);
+  assert.equal(seen.Authorization, undefined);
+  assert.equal(seen.Cookie, undefined);
+  // A gate that still wants a session says so, and that answer passes through.
+  const refusing = async () => ({ status: 401, json: async () => ({}) });
+  assert.deepEqual(await resolveUpstream(refusing, "u", { authorization: null, cookie: null }), { ok: false, status: 401 });
+});
+

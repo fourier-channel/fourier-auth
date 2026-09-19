@@ -225,6 +225,27 @@ export function saveOptions(parsed, searchParams) {
   return {};
 }
 
+/**
+ * Whether a request carrying NO credential is refused here, before the gate
+ * is asked, or handed to the gate to decide.
+ *
+ * Matrix media: refused. There is no anonymous Matrix identity, and asking
+ * fourier-auth would only cost a round trip to hear the same 401.
+ *
+ * Booru media: ASKED. Imageboard media is gated by the booru's own post
+ * visibility, not by a session (operator ruling 2026-09-18: "fourier-auth is
+ * uninvolved with archived media from imageboards"; BOORU_MEDIA_REQUIRE_SESSION
+ * is 0 on the gate). A published thread is read by people with no session at
+ * all, and the same picture answered 200 at the origin and 401 here, because
+ * this line refused before the gate could say yes. Discord's unfurler, a fresh
+ * browser and a plain curl all arrive with no cookie; the gate is the one
+ * rule about what they may see, and it is asked. Its refusals still pass
+ * through unchanged.
+ */
+export function refusesAnonymous(parsed) {
+  return parsed.kind !== "booru";
+}
+
 /** A Matrix-shaped error, so clients read it the way they read Synapse's. */
 export function deny(status, errcode, error, cors = corsHeaders()) {
   return new Response(JSON.stringify({ errcode, error }), {
@@ -263,7 +284,9 @@ export default {
     // what a user may see; it only decides how it proves who they are.
     const authorization = request.headers.get("Authorization");
     const cookie = request.headers.get("Cookie");
-    if (!authorization && !cookie) return deny(401, "M_MISSING_TOKEN", "Missing access token", cors);
+    if (!authorization && !cookie && refusesAnonymous(parsed)) {
+      return deny(401, "M_MISSING_TOKEN", "Missing access token", cors);
+    }
 
     // Cache the DECISION at the edge, not just the bytes.
     //
