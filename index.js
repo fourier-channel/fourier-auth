@@ -4,6 +4,8 @@ const cookieParser = require("cookie-parser");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { makeTokenSource } = require("./tokenRefresh");
+const { GateSignals } = require("./gateSignals");
+const signals = new GateSignals();
 const { createSession, saveSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
@@ -11,6 +13,11 @@ const tokenSource = makeTokenSource({
   getSession,
   saveSession,
   refreshGrant: (rt) => getProvider("oidc").refresh(rt),
+  // The source's two complaints are the lamp's amber and red.
+  log: {
+    warn: (m) => { console.warn(m); signals.staleUnrenewable(m.replace(/^\[session\] /, "")); },
+    error: (m) => { console.error(m); signals.refreshFailed(m.replace(/^\[session\] /, "")); },
+  },
 });
 const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
@@ -119,10 +126,20 @@ function applyMediaCors(req, res) {
 }
 
 // Health check (also verifies Redis connectivity)
+// THE HEALTH DOCUMENT THE PLANE READS: level + checks (fourier-coherence
+// serviceobs). "ok" used to mean "Redis answered PONG", which stayed green
+// through weeks of signed-in readers being refused pictures. The gate's own
+// refusals are the level now; Redis is one check among them.
 app.get("/healthz", async (req, res) => {
   let redisOk = false;
   try { redisOk = (await redisPing()) === "PONG"; } catch (e) {}
-  res.json({ status: "ok", service: "fourier-auth", redis: redisOk });
+  const gate = signals.health();
+  const checks = [
+    { id: "redis", label: "session store", level: redisOk ? "green" : "red", detail: redisOk ? "PONG" : "no PONG from Redis" },
+    ...gate.checks,
+  ];
+  const level = !redisOk || gate.level === "red" ? "red" : gate.level;
+  res.json({ status: level, service: "fourier-auth", redis: redisOk, checks, counts: gate.counts });
 });
 
 // Login: begin the OIDC Authorization Code flow. Redirects the browser to
@@ -233,6 +250,11 @@ app.get("/verify", makeVerifyHandler({
   // refresh -- sessions live a fixed TTL, so no refresh_at is published and
   // none is invented) plus the user's previous session, recorded at logout.
   sessionInfo: async (sid, session) => {
+    // Every booru page load passes here, so this is where an active reader's
+    // token is kept alive proactively -- and where the bar learns the token's
+    // life, which is the thing it was not measuring.
+    await tokenSource.freshToken(sid, session);
+    const fresh = (await getSession(sid)) || session;
     const [ttl, prev] = await Promise.all([
       sessionTtlRemaining(sid),
       getPreviousSession(session.matrixUserId),
@@ -241,6 +263,14 @@ app.get("/verify", makeVerifyHandler({
     const info = {};
     if (session.createdAt) info.created_at = Math.floor(session.createdAt / 1000);
     if (ttl != null) info.expires_at = now + ttl;
+    if (typeof fresh.tokenExpiresAt === "number") {
+      info.token_expires_at = Math.floor(fresh.tokenExpiresAt / 1000);
+      info.renewable = Boolean(fresh.refreshToken);
+      // When the gate will next renew it: a minute before it expires.
+      if (fresh.refreshToken) info.refresh_at = info.token_expires_at - 60;
+    } else {
+      info.renewable = Boolean(fresh.refreshToken);
+    }
     if (prev && prev.digest) {
       info.previous_digest = prev.digest;
       info.previous_ended_at = Math.floor((prev.endedAt || 0) / 1000);
@@ -363,6 +393,7 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // Synapse remains the final authority on validity: an invalid token earns a
   // 401 from the upstream media endpoint, which we pass straight through.
   let token = null;
+  let viaSession = false;
   const authz = req.headers.authorization || "";
   if (authz.startsWith("Bearer ")) {
     token = authz.slice(7).trim();
@@ -371,7 +402,7 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     const session = await getSession(sid);
     // Through the token source, never session.matrixToken directly: the
     // session outlives its token by a day, and this is where it is renewed.
-    if (session) token = await tokenSource.freshToken(sid, session);
+    if (session) { token = await tokenSource.freshToken(sid, session); viaSession = true; }
   }
   if (!token) {
     return res.status(401).json({ error: "no valid session or bearer token" });
@@ -400,6 +431,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     return res.status(503).json({ error: "media authorization temporarily unavailable" });
   }
   if (!allowed) {
+    // A reader who holds a session and is refused is the lamp's red: either
+    // their token is dead (the 2026-09-19 incident) or they are genuinely
+    // outside the room. The plane cannot tell which; a person reading the
+    // detail can, and either way it is a signed-in reader seeing a 403.
+    if (viaSession) signals.sessionRefused(403, `/media/${serverName}/${mediaId}`);
     return res.status(403).json({ error: "not authorized for this media" });
   }
 
