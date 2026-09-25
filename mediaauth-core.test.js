@@ -95,6 +95,69 @@ test("empty room lists are not cached; site-asset booleans are cached wrapped", 
   assert.deepEqual(cache.get("siteasset:mxc://41chan.net/m"), { v: false });
 });
 
+// A cached list only grows stale in one direction -- it misses rooms -- so a
+// refusal read from the cache is re-asked of the source. Reported 2026-09-25:
+// a new account's images partly never loaded.
+
+test("a room joined after the joined-rooms list was cached is not refused", async () => {
+  let joined = ["!a:x"];
+  const { deps, calls } = fakes({
+    queryMediaRooms: async (mxc) => { calls.mediaRooms++; return mxc.endsWith("/inA") ? ["!a:x"] : ["!b:x"]; },
+    fetchJoinedRooms: async () => { calls.joined++; return joined; },
+  });
+  const auth = createMediaAuth(deps);
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "inA"), true, "caches the list [!a]");
+  joined = ["!a:x", "!b:x"]; // the new account joins its second room
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "inB"), true, "an image in the room just joined loads");
+  assert.deepEqual(await deps.cacheGet("userrooms:h:tok"), ["!a:x", "!b:x"], "and the fresh list replaced the stale one");
+});
+
+test("an image posted again in a second room is not refused there", async () => {
+  let rooms = ["!a:x"];
+  const { deps } = fakes({
+    queryMediaRooms: async () => rooms,
+    fetchJoinedRooms: async (tok) => (tok === "old" ? ["!a:x"] : ["!b:x"]),
+  });
+  const auth = createMediaAuth(deps);
+  assert.equal(await auth.checkMediaAccess("old", "41chan.net", "pic"), true, "caches the image's rooms as [!a]");
+  rooms = ["!a:x", "!b:x"]; // reposted into !b
+  assert.equal(await auth.checkMediaAccess("new", "41chan.net", "pic"), true, "a reader only in !b sees it");
+});
+
+test("a room that turned encryption on after it was cached as clear is not refused", async () => {
+  let encrypted = false;
+  const { deps } = fakes({
+    queryMediaRooms: async () => [],
+    fetchJoinedRooms: async () => ["!dm:x"],
+    queryIsEncrypted: async () => encrypted,
+  });
+  const auth = createMediaAuth(deps);
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "m1", { roomId: "!dm:x" }), false);
+  encrypted = true;
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "m2", { roomId: "!dm:x" }), true);
+});
+
+test("a real refusal is still a refusal, and re-asks the source once however many ask", async () => {
+  const { deps, calls } = fakes({ fetchJoinedRooms: async () => { calls.joined++; return ["!other:x"]; } });
+  const auth = createMediaAuth(deps);
+  const results = await Promise.all(
+    Array.from({ length: 20 }, () => auth.checkMediaAccess("tok", "41chan.net", "abc"))
+  );
+  assert.ok(results.every((r) => r === false), "not in the room is still no");
+  assert.equal(calls.joined, 2, "one cached read and one fresh re-ask, not twenty");
+  assert.equal(calls.mediaRooms, 2, "likewise for the image's rooms");
+});
+
+test("an allow never pays for a re-ask, so a just-removed member's window is unchanged", async () => {
+  let joined = ["!room:x"];
+  const { deps, calls } = fakes({ fetchJoinedRooms: async () => { calls.joined++; return joined; } });
+  const auth = createMediaAuth(deps);
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "abc"), true);
+  joined = []; // removed from the room
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "abc"), true, "the cached allow stands for its TTL, as before");
+  assert.equal(calls.joined, 1, "and nothing was re-asked on the way");
+});
+
 test("Redis failing is a cache miss, not an outage", async () => {
   const { deps, calls } = fakes({
     cacheGet: async () => { throw new Error("redis down"); },

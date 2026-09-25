@@ -16,10 +16,16 @@
 // one query, and a gate that cannot reach its database says so instead of
 // lying.
 
+// These lifetimes bound how long an ALLOW can outlive the facts behind it.
+// They never make a denial: a no from the cache is re-asked of the source
+// before it is given (see checkMediaAccess), because every one of these lists
+// GROWS -- a user joins rooms, an image is posted again elsewhere, a room turns
+// encryption on -- and a list read before it grew says no to things that are
+// now yes.
 const TTL = {
   // An mxc does not change what it IS; long.
   siteAsset: 6 * 60 * 60,
-  // The rooms containing an mxc are effectively immutable once posted; long.
+  // The rooms containing an mxc only grow (a repost, a forward); long.
   mediaRooms: 6 * 60 * 60,
   // Membership changes; this is the security-sensitive window where a
   // just-removed user could still fetch. Short.
@@ -122,6 +128,40 @@ function createMediaAuth(deps, opts = {}) {
    * Returns true/false for a decision. THROWS MediaAuthUnavailable when the
    * decision could not be made. Never confuses the two.
    */
+  // The content rule, given the facts. isEncrypted is asked only when the
+  // encrypted-room hint is the last way in.
+  async function decideContent(mediaRooms, joinedRooms, roomId, isEncrypted) {
+    if (joinedRooms.length === 0) return false;
+    const joined = new Set(joinedRooms);
+    if (mediaRooms.length > 0) return mediaRooms.some((r) => joined.has(r));
+    if (!roomId || !joined.has(roomId)) return false;
+    return await isEncrypted(roomId);
+  }
+
+  // The same facts read from the source, bypassing the cache, and written back
+  // so the next ask sees them too. Coalesced like everything else: a wall of
+  // thumbnails denied together re-asks once.
+  const freshMediaRooms = (mxc) =>
+    coalesce("fresh:mediarooms:" + mxc, async () => {
+      const rooms = await deps.queryMediaRooms(mxc);
+      if (rooms.length > 0) await deps.cacheSet("mediarooms:" + mxc, rooms, ttl.mediaRooms).catch(() => {});
+      return rooms;
+    });
+  const freshJoinedRooms = (token) => {
+    const h = deps.hashToken(token);
+    return coalesce("fresh:userrooms:" + h, async () => {
+      const rooms = await deps.fetchJoinedRooms(token);
+      if (rooms.length > 0) await deps.cacheSet("userrooms:" + h, rooms, ttl.joinedRooms).catch(() => {});
+      return rooms;
+    });
+  };
+  const freshIsEncrypted = (roomId) =>
+    coalesce("fresh:encrypted:" + roomId, async () => {
+      const v = await deps.queryIsEncrypted(roomId);
+      await deps.cacheSet("encrypted:" + roomId, { v }, ttl.encrypted).catch(() => {});
+      return v;
+    });
+
   async function checkMediaAccess(token, serverName, mediaId, opts2 = {}) {
     const mxc = `mxc://${serverName}/${mediaId}`;
     try {
@@ -130,12 +170,22 @@ function createMediaAuth(deps, opts = {}) {
         resolveMediaRooms(mxc),
         getJoinedRooms(token),
       ]);
-      if (joinedRooms.length === 0) return false;
-      const joined = new Set(joinedRooms);
-      if (mediaRooms.length > 0) return mediaRooms.some((r) => joined.has(r));
-      const roomId = opts2.roomId;
-      if (!roomId || !joined.has(roomId)) return false;
-      return await isEncryptedRoom(roomId);
+      if (await decideContent(mediaRooms, joinedRooms, opts2.roomId, isEncryptedRoom)) return true;
+      // A NO FROM THE CACHE IS NOT A NO. Every cached list here only grows, so
+      // a stale one can only wrongly refuse. Reported 2026-09-25 as a new
+      // account whose images partly never loaded, and traced here: a new
+      // account joins rooms in its first minutes, and the joined-rooms list
+      // cached at its first image refused every image in the rooms it joined
+      // after that for five minutes -- Technetium's retries are spent in about
+      // twelve seconds, so the picture stayed "unavailable" -- and an image
+      // posted again in a second room was refused there for six hours to anyone
+      // not also in the first. Only a refusal pays for the re-ask; an allow is
+      // unchanged, including the short window a just-removed member keeps.
+      const [freshMedia, freshJoined] = await Promise.all([
+        freshMediaRooms(mxc),
+        freshJoinedRooms(token),
+      ]);
+      return await decideContent(freshMedia, freshJoined, opts2.roomId, freshIsEncrypted);
     } catch (err) {
       throw new MediaAuthUnavailable(err);
     }
