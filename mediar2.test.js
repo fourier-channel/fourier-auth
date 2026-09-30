@@ -64,8 +64,12 @@ test("prefers the requested method but does not fail without it", () => {
   assert.ok(pickThumbnail(scaleOnly, 32, "crop"), "must still answer when no crop exists");
 });
 
+// An image the booru does not hold has no canon index here: GetObject is a 404.
+const NO_INDEX = (cmd) => cmd.constructor.name === "GetObjectCommand";
+const notFound = () => { throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" }); };
+
 test("an empty prefix resolves to null so the caller falls back to streaming", async () => {
-  const s3 = { send: async () => ({ Contents: [] }) };
+  const s3 = { send: async (cmd) => (NO_INDEX(cmd) ? notFound() : { Contents: [] }) };
   assert.equal(await resolveR2Key(s3, "b", { serverName: "x", mediaId: "abcdef", isLocal: true, thumbSize: 240 }), null);
 });
 
@@ -79,7 +83,11 @@ test("originals need no listing at all", async () => {
 
 test("the thumbnail listing is cached, so one media id costs one LIST", async () => {
   let lists = 0;
-  const s3 = { send: async () => { lists++; return { Contents: [{ Key: "local_thumbnails/AG/TQ/x/240-240-image-jpeg-scale" }] }; } };
+  const s3 = { send: async (cmd) => {
+    if (NO_INDEX(cmd)) return notFound();
+    lists++;
+    return { Contents: [{ Key: "local_thumbnails/AG/TQ/x/240-240-image-jpeg-scale" }] };
+  } };
   const store = new Map();
   const cache = { get: async (k) => store.get(k) ?? null, set: async (k, v) => void store.set(k, v) };
   const args = { serverName: "41chan.net", mediaId: "AGTQx", isLocal: true, thumbSize: 240, cache };
@@ -171,4 +179,106 @@ test("canon's 404 is GONE (a 404), not CANON_UNAVAILABLE (a retry forever)", asy
     () => canonicalOriginalKey(s3, "b", { mediaId: MEDIA, askCanon: async () => { throw Object.assign(new Error("no local media"), { status: 404 }); } }),
     (err) => err instanceof OriginalUnavailable && err.code === "GONE",
   );
+});
+
+// ONE SET OF RENDITIONS (operator, 2026-09-30): when the booru holds the image,
+// a Matrix thumbnail is the booru's variant, and Synapse's renditions are not
+// even listed.
+const { pickVariant, parseVariantName, booruVariantKey, NO_VARIANTS_TTL } = require("./mediar2");
+const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
+
+const MD5 = "60afcbe772caded03b35238685f63696";
+const RAW = "535f0df6cc535647290653d9ce222874";
+const VARIANTS = ["180x180.jpg", "360x360.jpg", "720x720.webp", "sample.jpg"].map((n) => `variants/${MD5}/${n}`);
+
+function bucket({ index, variants = {}, synapse = [] }) {
+  const asked = [];
+  return {
+    asked,
+    async send(cmd) {
+      if (cmd instanceof GetObjectCommand) {
+        asked.push(`get ${cmd.input.Key}`);
+        if (!index) throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" });
+        return { Body: { transformToByteArray: async () => Buffer.from(JSON.stringify(index)) } };
+      }
+      if (cmd instanceof ListObjectsV2Command) {
+        const prefix = cmd.input.Prefix;
+        asked.push(`list ${prefix}`);
+        if (prefix.startsWith("variants/")) return { Contents: (variants[prefix] || []).map((Key) => ({ Key })) };
+        return { Contents: synapse.map((Key) => ({ Key })) };
+      }
+      throw new Error("unexpected command");
+    },
+  };
+}
+
+test("variant names: only Danbooru's thumbnail types count", () => {
+  assert.equal(parseVariantName(`variants/${MD5}/360x360.jpg`).box, 360);
+  assert.equal(parseVariantName(`variants/${MD5}/sample.jpg`).box, 850);
+  assert.equal(parseVariantName(`variants/${MD5}/original.png`), null);
+  assert.equal(parseVariantName(`variants/${MD5}/full.webp`), null);
+});
+
+test("the smallest variant at least as large as asked, else the largest", () => {
+  assert.match(pickVariant(VARIANTS, 96).key, /180x180/);
+  assert.match(pickVariant(VARIANTS, 180).key, /180x180/);
+  assert.match(pickVariant(VARIANTS, 240).key, /360x360/);
+  assert.match(pickVariant(VARIANTS, 640).key, /720x720/);
+  assert.match(pickVariant(VARIANTS, 800).key, /sample/);
+  assert.match(pickVariant(VARIANTS, 5000).key, /sample/);
+  assert.equal(pickVariant([], 240), null);
+});
+
+test("a booru-held image's thumbnail is the booru's variant; Synapse's are never listed", async () => {
+  const s3 = bucket({
+    index: { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5, rawMd5: RAW },
+    variants: { [`variants/${MD5}/`]: VARIANTS },
+    synapse: ["local_thumbnails/cb/kB/x/320-231-image-jpeg-scale"],
+  });
+  const key = await resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: "cbkBleYzcztAYaTcEqsrBmyx", isLocal: true, thumbSize: 320 });
+  assert.equal(key, `variants/${MD5}/360x360.jpg`);
+  assert.ok(!s3.asked.some((a) => a.includes("local_thumbnails")), "Synapse's renditions must not be consulted");
+});
+
+test("a tunnel post made before stripping keeps its variants under the RAW md5", async () => {
+  const s3 = bucket({
+    index: { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5, rawMd5: RAW },
+    variants: { [`variants/${RAW}/`]: [`variants/${RAW}/180x180.jpg`, `variants/${RAW}/sample.jpg`] },
+  });
+  assert.equal(await booruVariantKey(s3, "b", { mediaId: "x", thumbSize: 180 }), `variants/${RAW}/180x180.jpg`);
+});
+
+test("an image the booru does not hold keeps Synapse's renditions, its only set", async () => {
+  const s3 = bucket({ index: null, synapse: ["local_thumbnails/AG/TQ/x/96-96-image-jpeg-crop", "local_thumbnails/AG/TQ/x/320-240-image-jpeg-scale"] });
+  const key = await resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: "AGTQx", isLocal: true, thumbSize: 320 });
+  assert.match(key, /320-240-image-jpeg-scale/);
+});
+
+test("'no index' is remembered briefly, so an avatar does not cost an index read per request", async () => {
+  const s3 = bucket({ index: null, synapse: ["local_thumbnails/AG/TQ/x/96-96-image-jpeg-crop"] });
+  const cache = memCache();
+  const args = { serverName: "41chan.net", mediaId: "AGTQx", isLocal: true, thumbSize: 96, cache };
+  await resolveR2Key(s3, "b", args);
+  await resolveR2Key(s3, "b", args);
+  assert.equal(s3.asked.filter((a) => a.startsWith("get ")).length, 1);
+});
+
+test("no Synapse rendition and a cached 'no variants': look again before falling back", async () => {
+  // Posted since the "no" was cached. Falling back would make Synapse RENDER a
+  // thumbnail -- a second set of renditions for an image the booru now holds.
+  const s3 = bucket({
+    index: { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5 },
+    variants: { [`variants/${MD5}/`]: VARIANTS },
+  });
+  const cache = memCache();
+  await cache.set(`variants:${MD5}`, [], NO_VARIANTS_TTL);
+  const key = await resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: "x", isLocal: true, thumbSize: 180, cache });
+  assert.equal(key, `variants/${MD5}/180x180.jpg`);
+});
+
+test("remote media never looks for booru variants", async () => {
+  const s3 = bucket({ index: { kind: "canonical", md5: MD5 }, variants: { [`variants/${MD5}/`]: VARIANTS }, synapse: ["remote_thumbnail/m.org/AG/TQ/x/320-240-image-jpeg-scale"] });
+  const key = await resolveR2Key(s3, "b", { serverName: "m.org", mediaId: "AGTQx", isLocal: false, thumbSize: 320 });
+  assert.match(key, /remote_thumbnail/);
+  assert.ok(!s3.asked.some((a) => a.startsWith("get ") || a.includes("variants/")));
 });
