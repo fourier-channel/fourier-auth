@@ -176,6 +176,7 @@ async function verifySynapseIndexes() {
 module.exports = {
   verifySynapseIndexes,
   checkMediaAccess: core.checkMediaAccess,
+  decideMediaAccess: core.decideMediaAccess,
   isSiteAsset: core.isSiteAsset,
   resolveMediaRooms: core.resolveMediaRooms,
   getJoinedRooms: core.getJoinedRooms,

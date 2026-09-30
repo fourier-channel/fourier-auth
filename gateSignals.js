@@ -21,8 +21,21 @@
 //                     refresh token to renew it
 //   refresh_failures  a refresh_token grant MAS refused
 //
-// Any refusal is RED: one reader refused is the incident, not a trend. A
-// stale-unrenewable session is AMBER: it will be refused on its next Matrix
+// A refusal is sorted by WHY (mediaauth-core.js refusalReason), because "a
+// signed-in reader saw a 403" was two different facts wearing one lamp:
+//
+//   RED    the session itself is dead -- its token sees no room, or Synapse
+//          does not know it. That is the 2026-09-19 incident, and one is
+//          enough: every picture that reader asks for will fail.
+//   AMBER  the image is in no room the server can see -- deleted by its
+//          poster, never posted, or in an encrypted room the client did not
+//          name. Worth a look if it repeats; not an outage. Before this split
+//          the lamp went red all night on 2026-09-28 for an image deleted in
+//          June, and the gate was right every time.
+//   GREEN  the image is in rooms and the reader is in none of them: the gate
+//          doing its job. Counted, so a surge is visible, never flagged.
+//
+// A stale-unrenewable session is AMBER: it will be refused on its next Matrix
 // picture, and it is fixable by that reader signing in again.
 
 const WINDOW_MS = 10 * 60 * 1000;
@@ -31,7 +44,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], stale_unrenewable: [], refresh_failures: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [] };
     this.last = {};
   }
 
@@ -43,7 +56,14 @@ class GateSignals {
     if (detail) this.last[kind] = detail;
   }
 
-  sessionRefused(status, detail) { this.#note("session_refusals", `${status}${detail ? ` ${detail}` : ""}`); }
+  // reason: mediaauth-core's refusal reason. An unknown or absent reason is
+  // RED -- a refusal nobody explained is exactly what the lamp is for.
+  sessionRefused(status, detail, reason) {
+    const text = `${status}${detail ? ` ${detail}` : ""}`;
+    if (reason === "unplaced") this.#note("unplaced_media", text);
+    else if (reason === "not-member") this.#note("member_refusals", text);
+    else this.#note("session_refusals", reason ? `${text} (${reason})` : text);
+  }
   staleUnrenewable(detail) { this.#note("stale_unrenewable", detail); }
   refreshFailed(detail) { this.#note("refresh_failures", detail); }
 
@@ -68,8 +88,22 @@ class GateSignals {
         label: "signed-in readers refused",
         level: c.session_refusals > 0 ? "red" : "green",
         detail: c.session_refusals > 0
-          ? `${c.session_refusals} refusal(s) to a session cookie in 10 min; last: ${this.last.session_refusals || "?"}`
+          ? `${c.session_refusals} refusal(s) to a session whose token sees no room in 10 min; last: ${this.last.session_refusals || "?"}`
           : "none in 10 min",
+      },
+      {
+        id: "unplaced-media",
+        label: "images asked for that are in no room",
+        level: c.unplaced_media > 0 ? "amber" : "green",
+        detail: c.unplaced_media > 0
+          ? `${c.unplaced_media} in 10 min (deleted by its poster, or in an encrypted room the client did not name); last: ${this.last.unplaced_media || "?"}`
+          : "none in 10 min",
+      },
+      {
+        id: "member-refusals",
+        label: "readers refused a room they are not in",
+        level: "green",
+        detail: `${c.member_refusals} in 10 min -- the gate answering correctly${c.member_refusals > 0 ? `; last: ${this.last.member_refusals || "?"}` : ""}`,
       },
       {
         id: "refresh-failures",

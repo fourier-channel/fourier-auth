@@ -162,15 +162,45 @@ function createMediaAuth(deps, opts = {}) {
       return v;
     });
 
+  // WHY a refusal was a refusal, from the same facts the decision used. The
+  // lamp needs this (gateSignals.js): before it, every refusal to a signed-in
+  // reader turned the gate red, because the incident the lamp was built for --
+  // tokens that had died, 2026-09-19 -- looked identical to a correct no. On
+  // 2026-09-28 it went red over and over for an image its poster had deleted
+  // in June; the gate was right every time.
+  //
+  //   no-rooms       the token sees no room at all: a dead token (the
+  //                  incident) or an account that has joined nothing yet.
+  //   not-member     the image is in rooms, this reader is in none of them,
+  //                  and did not name one they are in. The gate working.
+  //   unplaced       the image is in no room this server can see: deleted,
+  //                  never posted, or in an encrypted room the client did not
+  //                  name (Element never names one).
+  function refusalReason(mediaRooms, joinedRooms, roomId) {
+    if (joinedRooms.length === 0) return "no-rooms";
+    if (mediaRooms.length > 0) return "not-member";
+    if (roomId && !joinedRooms.includes(roomId)) return "not-member";
+    return "unplaced";
+  }
+
   async function checkMediaAccess(token, serverName, mediaId, opts2 = {}) {
+    return (await decideMediaAccess(token, serverName, mediaId, opts2)).allowed;
+  }
+
+  // checkMediaAccess with its reason. {allowed: true}, or {allowed: false,
+  // reason} with reason one of: token-rejected (a site asset asked for with a
+  // token Synapse does not recognise), no-rooms, not-member, unplaced.
+  async function decideMediaAccess(token, serverName, mediaId, opts2 = {}) {
     const mxc = `mxc://${serverName}/${mediaId}`;
     try {
-      if (await isSiteAsset(mxc)) return await deps.whoamiOk(token);
+      if (await isSiteAsset(mxc)) {
+        return (await deps.whoamiOk(token)) ? { allowed: true } : { allowed: false, reason: "token-rejected" };
+      }
       const [mediaRooms, joinedRooms] = await Promise.all([
         resolveMediaRooms(mxc),
         getJoinedRooms(token),
       ]);
-      if (await decideContent(mediaRooms, joinedRooms, opts2.roomId, isEncryptedRoom)) return true;
+      if (await decideContent(mediaRooms, joinedRooms, opts2.roomId, isEncryptedRoom)) return { allowed: true };
       // A NO FROM THE CACHE IS NOT A NO. Every cached list here only grows, so
       // a stale one can only wrongly refuse. Reported 2026-09-25 as a new
       // account whose images partly never loaded, and traced here: a new
@@ -185,7 +215,8 @@ function createMediaAuth(deps, opts = {}) {
         freshMediaRooms(mxc),
         freshJoinedRooms(token),
       ]);
-      return await decideContent(freshMedia, freshJoined, opts2.roomId, freshIsEncrypted);
+      if (await decideContent(freshMedia, freshJoined, opts2.roomId, freshIsEncrypted)) return { allowed: true };
+      return { allowed: false, reason: refusalReason(freshMedia, freshJoined, opts2.roomId) };
     } catch (err) {
       throw new MediaAuthUnavailable(err);
     }
@@ -193,6 +224,7 @@ function createMediaAuth(deps, opts = {}) {
 
   return {
     checkMediaAccess,
+    decideMediaAccess,
     isSiteAsset,
     resolveMediaRooms,
     getJoinedRooms,

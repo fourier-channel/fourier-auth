@@ -75,6 +75,37 @@ test("a real 'no' is false and does not throw", async () => {
   assert.equal(await noRooms.checkMediaAccess("tok", "41chan.net", "abc"), false);
 });
 
+test("a refusal says WHY, from the facts it was decided on (the lamp sorts by it)", async () => {
+  const why = async (over, opts) =>
+    createMediaAuth(fakes(over).deps).decideMediaAccess("tok", "41chan.net", "m", opts);
+  // The image is in a room; the reader is in another one: the gate working.
+  assert.deepEqual(await why({ fetchJoinedRooms: async () => ["!other:x"] }), { allowed: false, reason: "not-member" });
+  // The token sees no room at all: a dead token, the 2026-09-19 incident.
+  assert.deepEqual(await why({ fetchJoinedRooms: async () => [] }), { allowed: false, reason: "no-rooms" });
+  // The image is in no room the server can see: the deleted-in-June case.
+  assert.deepEqual(await why({ queryMediaRooms: async () => [] }), { allowed: false, reason: "unplaced" });
+  // A named room the reader is not in is not-member, not unplaced.
+  assert.deepEqual(await why({ queryMediaRooms: async () => [] }, { roomId: "!else:x" }), { allowed: false, reason: "not-member" });
+  // A named room the reader IS in, but cleartext: the image was never there.
+  assert.deepEqual(
+    await why({ queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!clear:x"] }, { roomId: "!clear:x" }),
+    { allowed: false, reason: "unplaced" });
+  // A site asset asked for with a token Synapse does not know.
+  assert.deepEqual(await why({ queryIsSiteAsset: async () => true, whoamiOk: async () => false }), { allowed: false, reason: "token-rejected" });
+  // An allow carries no reason, and checkMediaAccess is still a plain boolean.
+  assert.deepEqual(await why({}), { allowed: true });
+  assert.equal(await createMediaAuth(fakes({ fetchJoinedRooms: async () => [] }).deps).checkMediaAccess("tok", "41chan.net", "m"), false);
+});
+
+test("the reason is read from the RE-ASKED facts, not the stale cache that caused the re-ask", async () => {
+  // First ask: cache says the reader is in no room. Re-ask: they are in a room,
+  // just not the image's. The reason must be not-member, not no-rooms.
+  let n = 0;
+  const { deps } = fakes({ fetchJoinedRooms: async () => (++n === 1 ? [] : ["!other:x"]) });
+  const d = await createMediaAuth(deps).decideMediaAccess("tok", "41chan.net", "m");
+  assert.deepEqual(d, { allowed: false, reason: "not-member" });
+});
+
 test("encrypted-room hint: honoured only for a joined room that is encrypted", async () => {
   const base = { queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!enc:x"] };
   const enc = createMediaAuth(fakes({ ...base, queryIsEncrypted: async () => true }).deps);

@@ -19,7 +19,7 @@ const tokenSource = makeTokenSource({
     error: (m) => { console.error(m); signals.refreshFailed(m.replace(/^\[session\] /, "")); },
   },
 });
-const { checkMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
+const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // Wiring, asserted at boot: the first deploy of /exchange answered every
 // request 503 "whoamiUser is not a function" because the helper had been
@@ -417,9 +417,9 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // only when the caller is genuinely joined to the room named -- see
   // mediaauth.js for why knowing the mxc is itself evidence of membership.
   const roomId = typeof req.query.room_id === "string" ? req.query.room_id : undefined;
-  let allowed;
+  let decision;
   try {
-    allowed = await checkMediaAccess(token, serverName, mediaId, { roomId });
+    decision = await decideMediaAccess(token, serverName, mediaId, { roomId });
   } catch (err) {
     if (!(err instanceof MediaAuthUnavailable)) throw err;
     // The gate could not be consulted. That is not "forbidden": the edge
@@ -430,12 +430,13 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     res.set("Retry-After", "1");
     return res.status(503).json({ error: "media authorization temporarily unavailable" });
   }
-  if (!allowed) {
-    // A reader who holds a session and is refused is the lamp's red: either
-    // their token is dead (the 2026-09-19 incident) or they are genuinely
-    // outside the room. The plane cannot tell which; a person reading the
-    // detail can, and either way it is a signed-in reader seeing a 403.
-    if (viaSession) signals.sessionRefused(403, `/media/${serverName}/${mediaId}`);
+  if (!decision.allowed) {
+    // A reader who holds a session and is refused goes to the lamp WITH the
+    // reason the gate refused: a dead token is red, an image in no room is
+    // amber, a reader outside the image's room is the gate working. The
+    // answer to the reader is the same 403 in every case -- the reason is for
+    // the lamp, never the response, which must not say why.
+    if (viaSession) signals.sessionRefused(403, `/media/${serverName}/${mediaId}`, decision.reason);
     return res.status(403).json({ error: "not authorized for this media" });
   }
 
