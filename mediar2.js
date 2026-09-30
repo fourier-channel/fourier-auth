@@ -31,7 +31,7 @@
 // being asked and immutable once written -- so it caches hard. One list per
 // media id per six hours, against one stream of every thumbnail byte forever.
 
-const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
+const { ListObjectsV2Command, GetObjectCommand } = require("@aws-sdk/client-s3");
 
 const THUMB_KEYS_TTL = 6 * 60 * 60; // immutable once written; cache hard
 
@@ -109,8 +109,88 @@ function pickThumbnail(candidates, want, method) {
  * streaming path stays as the fallback for exactly those, which is why this
  * function never throws for a miss.
  */
-async function resolveR2Key(s3, bucket, { serverName, mediaId, isLocal, thumbSize, method = "scale", cache }) {
+// ONE FILE PER IMAGE (operator decree, restated 2026-09-30: "One file,
+// always. One file, one source of metadata. Multiple surfaces." "All media
+// links lead to the stripped metadata file.").
+//
+// A local ORIGINAL is no longer Synapse's object. fourier-tunnel's canon.js
+// makes each Matrix image into ONE file -- its AI generation data stripped,
+// stored as media/<md5>.<ext>, the layout every other surface already uses --
+// and writes index/local/<mediaId>.json saying where it is. Synapse's own copy
+// is moved to superseded/ for the operator to review. So the gate reads the
+// index, and when there is none yet it asks canon to make one NOW, before it
+// answers: no link may ever lead to a file that still carries a prompt.
+//
+// Thumbnails are unchanged: Synapse renders them without the metadata, and
+// they stay the one set of renditions. Remote media is unchanged.
+const INDEX_TTL = 24 * 60 * 60; // an index entry is written once and never changes
+
+class OriginalUnavailable extends Error {
+  // code: "GONE" -- canon says there is no such image (404, permanent).
+  //       "WITHHELD" -- canon refused it (a format it cannot verify that carries
+  //                     metadata): there is no stripped file, so nothing is served.
+  //       "CANON_UNAVAILABLE" -- canon could not be asked: try again, never the raw.
+  constructor(code, message) {
+    super(message);
+    this.name = "OriginalUnavailable";
+    this.code = code;
+  }
+}
+
+async function readIndex(s3, bucket, mediaId) {
+  try {
+    const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: `index/local/${mediaId}.json` }));
+    return JSON.parse(Buffer.from(await out.Body.transformToByteArray()).toString("utf8"));
+  } catch (err) {
+    if (err && (err.name === "NoSuchKey" || err.name === "NotFound" || (err.$metadata && err.$metadata.httpStatusCode === 404))) return null;
+    throw err;
+  }
+}
+
+/**
+ * The R2 key of a local original: the one file canon.js made, asking canon
+ * to make it when it does not exist yet. Throws OriginalUnavailable rather
+ * than ever falling back to Synapse's unstripped object.
+ */
+async function canonicalOriginalKey(s3, bucket, { mediaId, cache, askCanon }) {
+  const cacheKey = `canonidx:${mediaId}`;
+  let idx = cache ? await cache.get(cacheKey).catch(() => null) : null;
+  if (!idx) idx = await readIndex(s3, bucket, mediaId);
+  if (!idx) {
+    try {
+      idx = await askCanon(mediaId);
+    } catch (err) {
+      // canon's 404 is permanent (unknown, quarantined, or gone from the bucket):
+      // answering "try again" would have clients retry forever.
+      if (err && err.status === 404) throw new OriginalUnavailable("GONE", `no such image: ${err.message}`);
+      throw new OriginalUnavailable("CANON_UNAVAILABLE", `canon could not make ${mediaId} canonical: ${err.message}`);
+    }
+  }
+  if (!idx || typeof idx !== "object") throw new OriginalUnavailable("CANON_UNAVAILABLE", `canon gave no index for ${mediaId}`);
+  if (cache && idx.kind) await cache.set(cacheKey, idx, INDEX_TTL).catch(() => {});
+  if (idx.kind === "refused") {
+    throw new OriginalUnavailable("WITHHELD", `withheld: its generation data could not be removed (${idx.reason || "no reason given"})`);
+  }
+  if ((idx.kind === "canonical" || idx.kind === "source") && typeof idx.key === "string" && idx.key) return idx.key;
+  throw new OriginalUnavailable("CANON_UNAVAILABLE", `the index for ${mediaId} names no file`);
+}
+
+// canon.js answers the gate over the docker network (fourier-tunnel's
+// startCanonService). POST so a crawler following links never triggers it.
+function canonClient({ axios, baseUrl, timeoutMs = 30000 }) {
+  return async (mediaId) => {
+    const resp = await axios.post(`${baseUrl}/canon/${encodeURIComponent(mediaId)}`, null, { timeout: timeoutMs, validateStatus: () => true });
+    if (resp.status === 200 && resp.data && typeof resp.data === "object") return resp.data;
+    const why = resp.data && resp.data.error ? resp.data.error : `status ${resp.status}`;
+    const err = new Error(why);
+    err.status = resp.status;
+    throw err;
+  };
+}
+
+async function resolveR2Key(s3, bucket, { serverName, mediaId, isLocal, thumbSize, method = "scale", cache, askCanon }) {
   if (!thumbSize) {
+    if (isLocal && askCanon) return canonicalOriginalKey(s3, bucket, { mediaId, cache, askCanon });
     return isLocal ? localOriginalKey(mediaId) : remoteOriginalKey(serverName, mediaId);
   }
 
@@ -136,5 +216,9 @@ module.exports = {
   parseThumbName,
   pickThumbnail,
   resolveR2Key,
+  canonicalOriginalKey,
+  canonClient,
+  OriginalUnavailable,
   THUMB_KEYS_TTL,
+  INDEX_TTL,
 };

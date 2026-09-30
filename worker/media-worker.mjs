@@ -47,10 +47,37 @@ export function parseBooruPath(pathname) {
   return { kind: "booru", file: m[1] };
 }
 
-/** Parse a Matrix authenticated-media path. Null for anything else. */
+/**
+ * The status a refusal from the gate is passed on with. The gate's own answers
+ * -- 401, 403, and since the one-file change 404 (no such image, or withheld:
+ * its generation data could not be removed) and 503 (being prepared) -- go
+ * through as they are; anything else is our failure, not the reader's, and
+ * says 502.
+ */
+export function denialStatus(s) {
+  return s === 401 || s === 403 || s === 404 || s === 503 ? s : 502;
+}
+const DENIAL = {
+  401: { errcode: "M_UNAUTHORIZED", error: "Not authorized for this media" },
+  403: { errcode: "M_FORBIDDEN", error: "Not authorized for this media" },
+  404: { errcode: "M_NOT_FOUND", error: "No such media, or it is withheld" },
+  503: { errcode: "M_UNKNOWN", error: "This media is being prepared; try again in a moment" },
+  502: { errcode: "M_UNKNOWN", error: "Media authorization is unavailable" },
+};
+
+/**
+ * Parse a Matrix authenticated-media path. Null for anything else.
+ *
+ * A DOWNLOAD may carry a trailing filename -- /download/<server>/<id>/<name>,
+ * which the spec allows and clients send for "save as". Before 2026-09-30 that
+ * shape did not match, went to the origin, and Synapse answered it with no room
+ * check and without the gate's one stripped file. The name is ignored: the
+ * file is the file.
+ */
 export function parseMediaPath(pathname) {
-  const m = /^\/_matrix\/client\/v1\/media\/(download|thumbnail)\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
+  const m = /^\/_matrix\/client\/v1\/media\/(download|thumbnail)\/([^/]+)\/([^/]+)(?:\/([^/]+))?\/?$/.exec(pathname);
   if (!m) return null;
+  if (m[4] !== undefined && m[1] !== "download") return null;
   return { kind: m[1], serverName: decodeURIComponent(m[2]), mediaId: decodeURIComponent(m[3]) };
 }
 
@@ -345,10 +372,12 @@ export default {
       // Infrastructure failure fails closed too. fourier-auth being unreachable
       // is an outage, and an outage that hides itself by leaking bytes is the
       // exact failure mode this whole system has been unpicking all week.
-      const status = decision.status === 401 || decision.status === 403 ? decision.status : 502;
-      return deny(status,
-        status === 401 ? "M_UNAUTHORIZED" : status === 403 ? "M_FORBIDDEN" : "M_UNKNOWN",
-        status === 502 ? "Media authorization is unavailable" : "Not authorized for this media", cors);
+      const status = denialStatus(decision.status);
+      const r = deny(status, DENIAL[status].errcode, DENIAL[status].error, cors);
+      // The gate's 503 is "this image is being made into its one file": a
+      // retry in a moment succeeds, and the client is told so.
+      if (status === 503) r.headers.set("Retry-After", "2");
+      return r;
     }
 
     // Edge cache keyed on the R2 object, NOT on the client's request -- so two

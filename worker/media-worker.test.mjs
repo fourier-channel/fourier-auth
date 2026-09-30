@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous } from "./media-worker.mjs";
+import { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous, denialStatus } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -110,12 +110,17 @@ test("a refusal is Matrix-shaped and never cached", async () => {
 });
 
 test("the status a denial carries", () => {
-  // fourier-auth's own answer is passed through for the two that ARE answers;
-  // anything else is our failure, not the user's, and says 502.
-  const map = (s) => (s === 401 || s === 403 ? s : 502);
-  assert.equal(map(401), 401);
-  assert.equal(map(403), 403);
-  for (const s of [500, 502, 504, undefined, 0]) assert.equal(map(s), 502, String(s));
+  // fourier-auth's own answers are passed through -- 404 (no such image, or
+  // withheld) and 503 (being prepared) included; anything else is our failure,
+  // not the reader's, and says 502.
+  for (const s of [401, 403, 404, 503]) assert.equal(denialStatus(s), s);
+  for (const s of [500, 502, 504, undefined, 0]) assert.equal(denialStatus(s), 502, String(s));
+});
+
+test("a download with a trailing filename goes through the gate, never straight to Synapse", () => {
+  assert.deepEqual(parseMediaPath("/_matrix/client/v1/media/download/41chan.net/abc/photo.png"),
+    { kind: "download", serverName: "41chan.net", mediaId: "abc" });
+  assert.equal(parseMediaPath("/_matrix/client/v1/media/thumbnail/41chan.net/abc/extra"), null, "a thumbnail has no filename");
 });
 
 test("CORS is on every response, including refusals", () => {

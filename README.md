@@ -140,6 +140,13 @@ not a CORS tweak. Empty means no cross-origin clients.
 Bearer) and `MEDIA_ORIGINAL_RELEASE` (leave at the default; `proxy` is an
 escape hatch that must stay off here).
 
+`CANON_URL` (default `http://fourier-tunnel:8011`): fourier-tunnel's canon
+service. Every local Matrix original is served as its ONE stripped file
+(`media/<md5>.<ext>`, found through `index/local/<mediaId>.json`); an original
+with no index entry yet is made canonical by asking canon before the gate
+answers. There is no fallback to Synapse's own copy: canon unreachable is a
+503, and an image canon refused is a 404 that says it is withheld.
+
 Secrets go in a gitignored `.env`; `docker-compose.yaml` substitutes them.
 
 ---

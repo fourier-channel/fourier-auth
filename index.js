@@ -1,7 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const cookieParser = require("cookie-parser");
-const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, GetObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { makeTokenSource } = require("./tokenRefresh");
 const { GateSignals } = require("./gateSignals");
@@ -28,7 +28,10 @@ const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 if (typeof whoamiUser !== "function") throw new Error("mediaauth must export whoamiUser");
 const { makeVerifyHandler } = require("./verify");
 const { originalRelease } = require("./release");
-const { resolveR2Key } = require("./mediar2");
+const { resolveR2Key, canonClient, OriginalUnavailable } = require("./mediar2");
+// fourier-tunnel's canon.js, over the docker network: it makes a Matrix image into
+// the ONE stripped file the gate then serves (see mediar2.js canonicalOriginalKey).
+const askCanon = canonClient({ axios, baseUrl: process.env.CANON_URL || "http://fourier-tunnel:8011" });
 const { parseBooruFile, pickVariant, booruR2Key, saveDisposition } = require("./booru-media");
 
 const app = express();
@@ -318,6 +321,36 @@ const BOORU_MEDIA_REQUIRE_SESSION = (process.env.BOORU_MEDIA_REQUIRE_SESSION ?? 
 const ORIGINAL_RELEASE_MODE =
   (process.env.MEDIA_ORIGINAL_RELEASE || "redirect").toLowerCase() === "proxy" ? "proxy" : "redirect";
 
+// Is this md5 some Matrix image's one file (canon.js's index/md5)? Cached: an
+// md5 that is one stays one.
+async function isMatrixImage(md5) {
+  const ck = `matrixmd5:${md5}`;
+  const hit = await cacheGetJson(ck).catch(() => null);
+  if (hit && typeof hit.v === "boolean") return hit.v;
+  const v = await headExists(`index/md5/${md5}.json`);
+  await cacheSetJson(ck, { v }, v ? 24 * 60 * 60 : 60).catch(() => {});
+  return v;
+}
+// Does an original exist at its key? A yes is cached for an hour; a no only
+// briefly, since an upload may be arriving.
+async function originalExists(key) {
+  const ck = `r2exists:${key}`;
+  const hit = await cacheGetJson(ck).catch(() => null);
+  if (hit && typeof hit.v === "boolean") return hit.v;
+  const v = await headExists(key);
+  await cacheSetJson(ck, { v }, v ? 60 * 60 : 30).catch(() => {});
+  return v;
+}
+async function headExists(key) {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    return true;
+  } catch (err) {
+    if (err && (err.name === "NotFound" || err.name === "NoSuchKey" || (err.$metadata && err.$metadata.httpStatusCode === 404))) return false;
+    throw err;
+  }
+}
+
 app.get("/booru/:file", async (req, res) => {
   // Parsed rather than interpolated: this string becomes an object key, and
   // the gate is reachable by more than the booru. See booru-media.test.js.
@@ -342,6 +375,24 @@ app.get("/booru/:file", async (req, res) => {
   // ?w=/?h= mirrors the mxc route, so chanbooru builds both URL shapes alike.
   const variant = pickVariant(req.query);
   const disposition = saveDisposition(parsed, req.query);
+
+  // ONE FILE, TWO DOORS, and this one is the booru's. Since canon.js a Matrix
+  // image's one file also lives in media/ -- including images from DMs and
+  // private rooms -- and this route serves by md5 alone, with no session
+  // (BOORU_MEDIA_REQUIRE_SESSION=0). So an md5 canon marks as a Matrix image is
+  // refused here: those are served only through the Matrix door, which asks
+  // the room. And an original that is not in the bucket (moved to superseded/)
+  // is refused rather than presigned, so a year-long edge cache of its old
+  // bytes is never reached through this door either.
+  try {
+    if (await isMatrixImage(parsed.md5)) return res.status(404).json({ error: "not found" });
+    if (!variant && !(await originalExists(booruR2Key(parsed.md5, parsed.ext, null)))) {
+      return res.status(404).json({ error: "not found" });
+    }
+  } catch (err) {
+    console.error("[booru-media] lookup failed:", err.message);
+    return res.status(503).json({ error: "media lookup unavailable" });
+  }
 
   try {
     const cmd = new GetObjectCommand({
@@ -494,6 +545,7 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
         thumbSize,
         method: "scale",
         cache: { get: cacheGetJson, set: cacheSetJson },
+        askCanon,
       });
       if (!key) throw new Error("not in R2");
       const signed = await presignKey(key);
@@ -509,6 +561,23 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
       }
       return res.json({ url: signed });
     } catch (err) {
+      // An original with no stripped file is NEVER served from anywhere else.
+      // Withheld: canon refused it, so there is no file without its prompt. Not
+      // ready: canon could not be asked -- the client tries again; it never gets
+      // Synapse's unstripped copy instead.
+      if (err instanceof OriginalUnavailable) {
+        res.set("Cache-Control", "no-store");
+        if (err.code === "GONE") {
+          return res.status(404).json({ errcode: "M_NOT_FOUND", error: "No such image." });
+        }
+        if (err.code === "WITHHELD") {
+          console.warn(`[media] ${serverName}/${mediaId} withheld: ${err.message}`);
+          return res.status(404).json({ errcode: "M_NOT_FOUND", error: "This image is withheld: its generation data could not be removed." });
+        }
+        console.error(`[media] ${serverName}/${mediaId}: ${err.message}`);
+        res.set("Retry-After", "2");
+        return res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
+      }
       // Presign failure -> fall through to the Synapse proxy below rather than
       // failing the request. Authorization already succeeded; this is a
       // delivery-path fallback, not an authz bypass.
