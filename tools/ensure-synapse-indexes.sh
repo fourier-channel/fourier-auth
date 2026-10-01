@@ -1,6 +1,6 @@
 #!/bin/sh
-# Apply db/synapse-indexes.sql to the live Synapse database and PROVE the
-# result. Run on the box at deploy, after `git pull` and before trusting media.
+# Apply db/synapse-indexes.sql AND db/synapse-grants.sql to the live Synapse
+# database and PROVE the result. Run on the box at deploy, after `git pull` and before trusting media.
 #
 #   tools/ensure-synapse-indexes.sh          apply, then verify
 #   tools/ensure-synapse-indexes.sh --check  verify only (read-only)
@@ -43,3 +43,24 @@ for n in $names; do
 done
 [ "$bad" -eq 0 ] || { echo "synapse indexes: NOT OK"; exit 2; }
 echo "synapse indexes: all present and valid"
+
+# The read-only role's privileges (db/synapse-grants.sql, 2026-10-01). Applied
+# by the DB owner for the same reason the indexes are; verified as the ROLE
+# would see them, with has_table_privilege, not by reading the file back.
+GRANTS="$HERE/db/synapse-grants.sql"
+RO_ROLE="${RO_ROLE:-fourier_auth_ro}"
+tables=$(grep -oE '^GRANT SELECT ON [a-z_]+' "$GRANTS" | awk '{print $NF}')
+[ -n "$tables" ] || { echo "no GRANT statements found in $GRANTS"; exit 2; }
+if [ "${1:-}" != "--check" ]; then
+  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q < "$GRANTS"
+fi
+for t in $tables; do
+  has=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "SELECT has_table_privilege('$RO_ROLE', '$t', 'SELECT');")
+  case "$has" in
+    t) echo "ok      SELECT on $t for $RO_ROLE" ;;
+    *) echo "MISSING SELECT on $t for $RO_ROLE"; bad=1 ;;
+  esac
+done
+[ "$bad" -eq 0 ] || { echo "synapse grants: NOT OK"; exit 2; }
+echo "synapse grants: all held"

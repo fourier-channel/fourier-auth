@@ -19,7 +19,7 @@ const tokenSource = makeTokenSource({
     error: (m) => { console.error(m); signals.refreshFailed(m.replace(/^\[session\] /, "")); },
   },
 });
-const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, whoamiUser } = require("./mediaauth");
+const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, verifySynapseGrants, whoamiUser } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // Wiring, asserted at boot: the first deploy of /exchange answered every
 // request 503 "whoamiUser is not a function" because the helper had been
@@ -27,7 +27,11 @@ const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // A missing export is a boot failure here, not a 503 for verification to find.
 if (typeof whoamiUser !== "function") throw new Error("mediaauth must export whoamiUser");
 const { makeVerifyHandler } = require("./verify");
-const { originalRelease } = require("./release");
+const { originalRelease, sendRelease } = require("./release");
+const { isEdgeCaller, edgeClientIp, healthDetailAllowed } = require("./callers");
+const { createBooruVisibility, booruPostsClient } = require("./booru-visibility");
+const { makeBooruHandler } = require("./booru-route");
+const crypto = require("crypto");
 const { resolveR2Key, canonClient, OriginalUnavailable } = require("./mediar2");
 // fourier-tunnel's canon.js, over the docker network: it makes a Matrix image into
 // the ONE stripped file the gate then serves (see mediar2.js canonicalOriginalKey).
@@ -106,6 +110,32 @@ async function presignKey(key) {
   return getSignedUrl(s3, cmd, { expiresIn: R2_PRESIGN_TTL });
 }
 
+// THE EDGE SECRET (leak audit F-G2, 2026-10-01). Presigned URLs are released
+// only to a caller presenting this in X-Fourier-Edge: the Cloudflare Worker,
+// which holds the same value as a Worker secret. Everyone else gets the
+// decision and no URL (release.js sendRelease, callers.js). Unset means NO
+// caller is the edge -- every picture fails, loudly -- never that every caller
+// is.
+const MEDIA_EDGE_SECRET = process.env.MEDIA_EDGE_SECRET || "";
+if (!MEDIA_EDGE_SECRET) {
+  console.error("[media] MEDIA_EDGE_SECRET IS NOT SET -- no presigned URL will be released to anyone, so every picture behind the Worker fails. Set it to the Worker's MEDIA_EDGE_SECRET.");
+}
+const isEdge = (headers) => isEdgeCaller(headers, MEDIA_EDGE_SECRET);
+
+// Where the booru answers "which posts may this reader see" (F-G1): its Rails
+// app on the docker network, asked directly so no public edge, challenge or
+// identity header is in the way. Measured from this container 2026-10-01.
+const BOORU_INTERNAL_URL = process.env.BOORU_INTERNAL_URL || "http://danbooru:3000";
+const booruVisibility = createBooruVisibility({
+  fetchVisible: booruPostsClient({ axios, baseUrl: BOORU_INTERNAL_URL }),
+  cacheGet: cacheGetJson,
+  cacheSet: cacheSetJson,
+  hashKey: (s) => crypto.createHash("sha256").update(String(s)).digest("hex").slice(0, 32),
+});
+
+// What the boot-time schema check found, for /healthz. null until it has run.
+let schemaReport = null;
+
 // Thumbnail sizes the gate will request from Synapse. Requested ?w=/?h=
 // values are snapped to the nearest entry so callers can't induce
 // arbitrary-size thumbnail generation.
@@ -133,15 +163,37 @@ function applyMediaCors(req, res) {
 // serviceobs). "ok" used to mean "Redis answered PONG", which stayed green
 // through weeks of signed-in readers being refused pictures. The gate's own
 // refusals are the level now; Redis is one check among them.
+//
+// Public callers get levels, labels and counts. The "last:" detail -- which
+// names mxc ids and Matrix user ids -- goes only to a caller on this machine
+// or the tailnet that came through no proxy (leak audit F-G5; callers.js).
 app.get("/healthz", async (req, res) => {
   let redisOk = false;
   try { redisOk = (await redisPing()) === "PONG"; } catch (e) {}
-  const gate = signals.health();
+  const detail = healthDetailAllowed(req.socket && req.socket.remoteAddress, req.headers);
+  const gate = signals.health(undefined, { detail });
   const checks = [
     { id: "redis", label: "session store", level: redisOk ? "green" : "red", detail: redisOk ? "PONG" : "no PONG from Redis" },
+    {
+      id: "edge-secret",
+      label: "media edge secret configured",
+      level: MEDIA_EDGE_SECRET ? "green" : "red",
+      detail: MEDIA_EDGE_SECRET ? "set" : "MEDIA_EDGE_SECRET unset: no URL is released, every picture fails",
+    },
+    {
+      id: "synapse-schema",
+      label: "Synapse indexes and grants the gate needs",
+      // Unchecked (just booted, or the database did not answer the check) is
+      // amber: unmeasured never renders as healthy, nor as a known fault.
+      level: !schemaReport || schemaReport.ok === null ? "amber" : schemaReport.ok ? "green" : "red",
+      detail: !schemaReport ? "not checked yet"
+        : schemaReport.ok === true ? "present"
+        : detail ? schemaReport.detail : "see the service log",
+    },
     ...gate.checks,
   ];
-  const level = !redisOk || gate.level === "red" ? "red" : gate.level;
+  const level = checks.some((c) => c.level === "red") ? "red"
+    : checks.some((c) => c.level === "amber") ? "amber" : "ok";
   res.json({ status: level, service: "fourier-auth", redis: redisOk, checks, counts: gate.counts });
 });
 
@@ -351,71 +403,35 @@ async function headExists(key) {
   }
 }
 
-app.get("/booru/:file", async (req, res) => {
-  // Parsed rather than interpolated: this string becomes an object key, and
-  // the gate is reachable by more than the booru. See booru-media.test.js.
-  const parsed = parseBooruFile(req.params.file);
-  if (!parsed) return res.status(400).json({ error: "bad media path" });
-
-  applyMediaCors(req, res);
-
-  if (!r2Enabled) {
-    // No Synapse fallback exists for these -- R2 is the only copy, by design.
-    return res.status(503).json({ error: "R2 not configured" });
-  }
-
-  // The SAME fourier login that already gates Synapse media (operator, 2026-08-11).
-  // Not a second sign-in: a user who has logged in to see mxc media is already
-  // carrying this cookie, so booru media comes with it and no new flow appears.
-  if (BOORU_MEDIA_REQUIRE_SESSION) {
-    const session = await getSession(req.cookies[COOKIE_NAME]);
-    if (!session) return res.status(401).json({ error: "no valid session" });
-  }
-
-  // ?w=/?h= mirrors the mxc route, so chanbooru builds both URL shapes alike.
-  const variant = pickVariant(req.query);
-  const disposition = saveDisposition(parsed, req.query);
-
-  // ONE FILE, TWO DOORS, and this one is the booru's. Since canon.js a Matrix
-  // image's one file also lives in media/ -- including images from DMs and
-  // private rooms -- and this route serves by md5 alone, with no session
-  // (BOORU_MEDIA_REQUIRE_SESSION=0). So an md5 canon marks as a Matrix image is
-  // refused here: those are served only through the Matrix door, which asks
-  // the room. And an original that is not in the bucket (moved to superseded/)
-  // is refused rather than presigned, so a year-long edge cache of its old
-  // bytes is never reached through this door either.
-  try {
-    if (await isMatrixImage(parsed.md5)) return res.status(404).json({ error: "not found" });
-    if (!variant && !(await originalExists(booruR2Key(parsed.md5, parsed.ext, null)))) {
-      return res.status(404).json({ error: "not found" });
-    }
-  } catch (err) {
-    console.error("[booru-media] lookup failed:", err.message);
-    return res.status(503).json({ error: "media lookup unavailable" });
-  }
-
-  try {
-    const cmd = new GetObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: booruR2Key(parsed.md5, parsed.ext, variant),
-      // md5-keyed content is immutable by construction, so a year is safe and
-      // saves re-fetching a full original on every view.
-      ResponseCacheControl: "private, max-age=31536000, immutable",
-      ...(disposition ? { ResponseContentDisposition: disposition } : {}),
-    });
-    const signed = await getSignedUrl(s3, cmd, { expiresIn: R2_PRESIGN_TTL });
-    // The presigned URL is short-lived, so neither the 302 nor the JSON
-    // envelope may be cached and replayed stale.
-    res.set("Cache-Control", "no-store");
-    if (originalRelease(req.headers) === "redirect") {
-      return res.redirect(302, signed);
-    }
-    return res.json({ url: signed });
-  } catch (err) {
-    console.error("[booru-media] presign failed:", err.message);
-    return res.status(502).json({ error: "could not release media" });
-  }
-});
+// The route's rules live in booru-route.js, where they are tested; this is
+// only the wiring. See that file for the order of the questions.
+app.get("/booru/:file", makeBooruHandler({
+  parseBooruFile, pickVariant, booruR2Key, saveDisposition,
+  applyCors: applyMediaCors,
+  r2Enabled,
+  requireSession: BOORU_MEDIA_REQUIRE_SESSION,
+  getSession,
+  cookieName: COOKIE_NAME,
+  // The reader's own booru session (Danbooru.config.session_cookie_name). Only
+  // ever forwarded to the booru itself, to ask what THIS reader may see.
+  booruCookieName: "_danbooru2_session",
+  clientIp: (headers) => edgeClientIp(headers, MEDIA_EDGE_SECRET),
+  isMatrixImage,
+  originalExists,
+  visibility: booruVisibility,
+  presign: (key, disposition) => getSignedUrl(s3, new GetObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    // md5-keyed content is immutable by construction, so a year is safe and
+    // saves re-fetching a full original on every view.
+    ResponseCacheControl: "private, max-age=31536000, immutable",
+    ...(disposition ? { ResponseContentDisposition: disposition } : {}),
+  }), { expiresIn: R2_PRESIGN_TTL }),
+  isEdge,
+  sendRelease,
+  signals,
+  log: console,
+}));
 
 // releases local originals from R2 (content-negotiated: a 302 to a presigned URL
 // for native browser loads, or a JSON { url } envelope for fetch()/XHR callers --
@@ -548,18 +564,13 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
         askCanon,
       });
       if (!key) throw new Error("not in R2");
-      const signed = await presignKey(key);
-      // No-store on both paths: the presigned URL is short-lived, so neither the
-      // JSON envelope nor the 302 mapping may be cached and reused stale.
-      res.set("Cache-Control", "no-store");
-      // Content-negotiate the release (see release.js for the full rationale and
-      // the never-redirect-a-cors-fetch safety invariant). Native browser loads
-      // (<img>, link navigation, download) get a 302 straight to R2 and work with
-      // no client-side resolution; fetch()/XHR callers (Technetium) keep JSON.
-      if (originalRelease(req.headers) === "redirect") {
-        return res.redirect(302, signed);
-      }
-      return res.json({ url: signed });
+      // Only the edge Worker is handed the presigned URL (F-G2); a direct
+      // caller is told the decision and nothing it could fetch with.
+      const edge = isEdge(req.headers);
+      const signed = edge ? await presignKey(key) : null;
+      // Content-negotiated for the edge (see release.js for the full rationale
+      // and the never-redirect-a-cors-fetch safety invariant); no-store always.
+      return sendRelease(req, res, signed, { edge });
     } catch (err) {
       // An original with no stripped file is NEVER served from anywhere else.
       // Withheld: canon refused it, so there is no file without its prompt. Not
@@ -606,7 +617,7 @@ app.listen(PORT, () => {
   console.log(`fourier-auth listening on port ${PORT}`);
   // Say at boot whether the media gate's indexes exist, rather than letting a
   // fresh database announce it as 5-second thumbnails and 403s.
-  verifySynapseIndexes().then((r) => {
+  Promise.all([verifySynapseIndexes(), verifySynapseGrants()]).then(([r, g]) => {
     if (r.ok) {
       console.log(`[mediaauth] synapse indexes present and valid: ${r.declared.join(", ")}`);
     } else {
@@ -615,7 +626,18 @@ app.listen(PORT, () => {
         "Media authorization will run as sequential scans. Run tools/ensure-synapse-indexes.sh on the box."
       );
     }
+    if (g.ok) {
+      console.log(`[mediaauth] synapse grants held: SELECT on ${g.declared.join(", ")}`);
+    } else {
+      console.error(
+        `[mediaauth] SYNAPSE GRANTS MISSING -- no SELECT on [${g.missing.join(", ")}]. ` +
+        "Every Matrix media decision will fail (503). Run tools/ensure-synapse-indexes.sh on the box."
+      );
+    }
+    const bad = [...r.missing, ...r.invalid].map((n) => `index ${n}`).concat(g.missing.map((t) => `grant ${t}`));
+    schemaReport = { ok: r.ok && g.ok, detail: bad.length ? `missing: ${bad.join(", ")}` : "present" };
   }).catch((err) => {
-    console.error("[mediaauth] could not verify synapse indexes:", err.code || err.message);
+    console.error("[mediaauth] could not verify synapse indexes/grants:", err.code || err.message);
+    schemaReport = { ok: null, detail: `could not check: ${err.code || err.message}` };
   });
 });

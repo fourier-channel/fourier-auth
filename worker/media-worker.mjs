@@ -121,8 +121,21 @@ export function authUrl(base, { serverName, mediaId, kind, file }, searchParams)
  * the { url } JSON envelope rather than a 302. A Worker following a redirect
  * would work, but the envelope means the presigned URL never becomes a
  * client-visible Location header even by accident.
+ *
+ * THE EDGE SECRET (leak audit F-G2, 2026-10-01). The gate is publicly
+ * reachable, and until this it handed the same presigned URL to anyone who
+ * asked it directly -- the R2 account id, the bucket and the access key id
+ * included. It now releases a URL only to a request carrying MEDIA_EDGE_SECRET
+ * in X-Fourier-Edge, which is this Worker; anyone else gets the decision with
+ * no URL. The reader's address (CF-Connecting-IP) rides alongside so the
+ * booru, asked on the reader's behalf, records the reader and not the gate.
+ * Both headers are built here, never copied from the client's request.
+ *
+ * A 200 that says released:false is the gate refusing to hand THIS Worker a
+ * URL -- the secret is missing here or differs from the gate's -- and is
+ * reported as such (withheld), so the log says what to fix.
  */
-export async function resolveUpstream(fetchImpl, url, credentials) {
+export async function resolveUpstream(fetchImpl, url, credentials, edge = {}) {
   // Accepts either shape, forwards whichever it was given. A Bearer wins when
   // both are present, matching fourier-auth's own precedence -- one rule about
   // which credential speaks, written in one place and mirrored here rather
@@ -136,11 +149,31 @@ export async function resolveUpstream(fetchImpl, url, credentials) {
   };
   if (authorization) headers.Authorization = authorization;
   else if (cookie) headers.Cookie = cookie;
+  if (edge.secret) headers["X-Fourier-Edge"] = edge.secret;
+  if (edge.secret && edge.clientIp) headers["X-Fourier-Client-IP"] = edge.clientIp;
   const res = await fetchImpl(url, { headers });
   if (res.status !== 200) return { ok: false, status: res.status };
   const body = await res.json().catch(() => null);
+  if (body && body.released === false) return { ok: false, status: 502, withheld: true };
   if (!body || typeof body.url !== "string") return { ok: false, status: 502 };
   return { ok: true, url: body.url };
+}
+
+/**
+ * How long an ALLOW is reused at the edge, by kind.
+ *
+ * Matrix media: 240 s (operator ruling 2026-08-16, below).
+ *
+ * Booru media: 60 s. Its decision now carries post VISIBILITY (leak audit
+ * F-G1): a post jailed or deleted after a reader's allow was cached keeps
+ * serving that reader for as long as the allow lives here, plus the gate's own
+ * 120 s positive cache. The edge byte cache cannot extend that: it is reached
+ * only after an allow. So the worst case for a just-jailed image is ~3 min,
+ * not ~6 -- and the cost is one more round trip per reader per image per
+ * minute, which the gate answers from Redis.
+ */
+export function decisionTtl(kind) {
+  return kind === "booru" ? 60 : 240;
 }
 
 /** The file extension a saved copy of this media type should carry. */
@@ -331,7 +364,8 @@ export default {
     // 240s, not 300: the decision carries a presigned URL that fourier-auth
     // mints for 300s, so a shorter TTL guarantees at least 60s of life left on
     // any URL served from cache. Handing out a credential about to expire is
-    // the failure the old client's REUSE_MARGIN_MS existed to avoid.
+    // the failure the old client's REUSE_MARGIN_MS existed to avoid. Booru
+    // media is shorter still -- see decisionTtl.
     //
     // ALLOWS ONLY. A cached denial would lock a user out of a room they just
     // joined for the rest of the window, and denials are cheap to re-ask.
@@ -344,10 +378,16 @@ export default {
     if (cachedDecision) {
       decision = await cachedDecision.json();
     } else {
-      decision = await resolveUpstream(fetch, authzUrl, { authorization, cookie });
+      // Not refusing here when the secret is missing: the GATE enforces it, and
+      // an old gate needs no secret, which is what lets the secret be put and
+      // this Worker deployed before the gate that requires it.
+      if (!env.MEDIA_EDGE_SECRET) console.error("MEDIA_EDGE_SECRET is not set on this Worker; the gate will release no media URL to it");
+      decision = await resolveUpstream(fetch, authzUrl, { authorization, cookie },
+        { secret: env.MEDIA_EDGE_SECRET, clientIp: request.headers.get("CF-Connecting-IP") });
+      if (decision.withheld) console.error("the gate WITHHELD the media URL: MEDIA_EDGE_SECRET here does not match the gate's");
       if (decision.ok) {
         ctx.waitUntil(cache.put(authzKey, new Response(JSON.stringify(decision), {
-          headers: { "Content-Type": "application/json", "Cache-Control": "max-age=240" },
+          headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${decisionTtl(parsed.kind)}` },
         })));
       }
     }

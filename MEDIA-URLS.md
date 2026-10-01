@@ -20,8 +20,9 @@ better caching control and simpler code. It is still wrong here.
 
 | path | correct behaviour |
 |---|---|
-| booru-native original (`/booru/<md5>.<ext>`) | 302 to presigned R2 |
-| local mxc original (`/media/<server>/<id>`) | 302 to presigned R2 |
+| booru-native original (`/booru/<md5>.<ext>`) | to the edge Worker only: 302 or `{url}` to presigned R2 |
+| local mxc original (`/media/<server>/<id>`) | to the edge Worker only: 302 or `{url}` to presigned R2 |
+| either route, any caller without `MEDIA_EDGE_SECRET` | the decision, no URL (`released: false`) |
 | anything a browser renders as an image | must not stream through this host |
 
 `MEDIA_ORIGINAL_RELEASE` defaults to `redirect` for this reason and must stay
@@ -60,9 +61,22 @@ The Worker described above has been in front of Matrix media since
 2026-08-15. On 2026-09-06 the operator saw the same X-Amz URL on the booru
 ("open image in new tab"), a surface by then mounted inside Technetium, and
 ruled that the same fix applies without being asked: the Worker now also owns
-`booru.41chan.net/fourier/booru/*`. The gate's 302-to-presigned behaviour is
-unchanged and still the fallback if the route is removed; the reader simply
-never sees it, because Cloudflare answers the clean URL with the bytes.
+`booru.41chan.net/fourier/booru/*`, and Cloudflare answers the clean URL with
+the bytes.
+
+## 2026-10-01: the URL goes to the Worker and nowhere else
+
+The leak audit found the gate itself answering anyone at `mxc.41chan.net`
+with the presigned URL the Worker gets. The gate now releases it only to a
+request carrying `MEDIA_EDGE_SECRET` (the Worker's secret of the same name);
+everyone else is told the decision and handed nothing to fetch with. There
+is therefore NO fallback if the Worker route is removed: a booru `<img>`
+pointed at the origin gets a JSON decision, not a picture. That is
+deliberate -- a fallback that works is a fallback that leaks.
+
+The same audit closed bytes-by-md5 for booru media: the gate now asks the
+booru whether a post the reader may see carries the md5, and serves nothing
+for a jailed, deleted or never-posted image.
 
 Same day, the booru session became zero-click from Technetium: `POST
 /exchange` with a Bearer Matrix token from a listed client origin, proven by

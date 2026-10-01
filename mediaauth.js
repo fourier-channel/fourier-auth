@@ -29,11 +29,13 @@ const { Pool } = require("pg");
 const axios = require("axios");
 const crypto = require("crypto");
 const { cacheGetJson, cacheSetJson } = require("./session");
-const { createMediaAuth, MediaAuthUnavailable, declaredIndexNames } = require("./mediaauth-core");
+const { createMediaAuth, MediaAuthUnavailable, declaredIndexNames, declaredGrantTables } = require("./mediaauth-core");
+const { makeQueries } = require("./mediaauth-sql");
 const fs = require("fs");
 const path = require("path");
 
 const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
+const HOMESERVER_NAME = process.env.HOMESERVER_NAME || "41chan.net";
 
 const pool = new Pool({
   host: process.env.SYNAPSE_DB_HOST,
@@ -52,55 +54,9 @@ pool.on("error", (err) => {
   console.error("[mediaauth] pg pool error:", err.code || err.message);
 });
 
-// Site asset: an avatar (profile or member event), a room icon, or an image in
-// an emoji pack (im.ponies.* / m.image_pack -- a reaction image is chrome too).
-async function queryIsSiteAsset(mxc) {
-  const { rows } = await pool.query(
-    `select 1 where exists (select 1 from profiles where avatar_url = $1)
-        or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id
-                    where e.type = 'm.room.member'
-                      and ej.json::jsonb #>> '{content,avatar_url}' = $1)
-        or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id
-                    where e.type = 'm.room.avatar'
-                      and ej.json::jsonb #>> '{content,url}' = $1)
-        or exists (select 1 from events e join event_json ej on e.event_id = ej.event_id,
-                        lateral jsonb_each(coalesce(ej.json::jsonb #> '{content,images}', '{}'::jsonb)) img
-                    where e.type in ('im.ponies.room_emotes', 'im.ponies.user_emotes', 'm.image_pack')
-                      and img.value ->> 'url' = $1)
-      limit 1`,
-    [mxc]
-  );
-  return rows.length > 0;
-}
-
-// Every place an mxc can legitimately appear: message bodies and stickers
-// (content.url and the thumbnail_url inside info -- a thumbnail is a different
-// mxc from its original), room avatars, and member avatars. Missing the avatar
-// forms is what once 403'd every profile picture the moment Synapse's own
-// fall-through was closed.
-async function queryMediaRooms(mxc) {
-  const { rows } = await pool.query(
-    `select distinct e.room_id
-       from events e
-       join event_json ej on e.event_id = ej.event_id
-      where (e.type in ('m.room.message', 'm.sticker')
-              and (ej.json::jsonb #>> '{content,url}' = $1
-                or ej.json::jsonb #>> '{content,info,thumbnail_url}' = $1))
-         or (e.type = 'm.room.avatar' and ej.json::jsonb #>> '{content,url}' = $1)
-         or (e.type = 'm.room.member' and ej.json::jsonb #>> '{content,avatar_url}' = $1)`,
-    [mxc]
-  );
-  return rows.map((r) => r.room_id);
-}
-
-async function queryIsEncrypted(roomId) {
-  const { rows } = await pool.query(
-    `select 1 from current_state_events
-      where room_id = $1 and type = 'm.room.encryption' and state_key = '' limit 1`,
-    [roomId]
-  );
-  return rows.length > 0;
-}
+// The queries live in mediaauth-sql.js, as functions of this pool.
+const { queryUploader, queryIsSiteAsset, queryMediaRooms, queryUploaderJoined, queryIsEncrypted } =
+  makeQueries(pool, { homeserverName: HOMESERVER_NAME });
 
 // Is this token valid on THIS server? The only question a site asset asks.
 // A transport failure throws (Synapse unreachable is not "token invalid");
@@ -139,9 +95,11 @@ async function fetchJoinedRooms(token) {
 }
 
 const core = createMediaAuth({
+  queryUploader,
   queryIsSiteAsset,
   queryMediaRooms,
   queryIsEncrypted,
+  queryUploaderJoined,
   whoamiOk,
   fetchJoinedRooms,
   cacheGet: cacheGetJson,
@@ -173,8 +131,24 @@ async function verifySynapseIndexes() {
   return { ok: missing.length === 0 && invalid.length === 0, declared: names, missing, invalid };
 }
 
+// Does this service's own role hold the privileges it queries with? Asked of
+// Postgres (has_table_privilege), never of the file. A missing grant is every
+// Matrix picture answering 503, so it is said at boot and on /healthz.
+async function verifySynapseGrants() {
+  const sql = fs.readFileSync(path.join(__dirname, "db", "synapse-grants.sql"), "utf8");
+  const tables = declaredGrantTables(sql);
+  const { rows } = await pool.query(
+    `select t as name, has_table_privilege(current_user, t, 'SELECT') as ok
+       from unnest($1::text[]) as t`,
+    [tables]
+  );
+  const missing = rows.filter((r) => !r.ok).map((r) => r.name);
+  return { ok: missing.length === 0, declared: tables, missing };
+}
+
 module.exports = {
   verifySynapseIndexes,
+  verifySynapseGrants,
   checkMediaAccess: core.checkMediaAccess,
   decideMediaAccess: core.decideMediaAccess,
   isSiteAsset: core.isSiteAsset,

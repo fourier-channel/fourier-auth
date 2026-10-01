@@ -30,6 +30,14 @@ services:
       # fourier-auth is uninvolved with archived imageboard media (operator,
       # 2026-09-18). Off = public bytes, the flag the gate was built with.
       - BOORU_MEDIA_REQUIRE_SESSION=0
+      # ...and "the booru decides" is now ASKED, per md5, of the booru's own
+      # posts API on the docker network (leak audit F-G1, 2026-10-01): no
+      # visible post, no bytes -- jailed, deleted and never-posted images 404.
+      - BOORU_INTERNAL_URL=http://danbooru:3000
+      # Presigned URLs go only to the Cloudflare Worker, which proves itself
+      # with this shared secret (F-G2). Same value as the Worker's secret of
+      # the same name. In .env, never here.
+      - MEDIA_EDGE_SECRET=${MEDIA_EDGE_SECRET}
       - HOMESERVER_NAME=41chan.net
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
       - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}

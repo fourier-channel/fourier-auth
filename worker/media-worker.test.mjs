@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous, denialStatus } from "./media-worker.mjs";
+import worker, { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous, denialStatus, decisionTtl } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -248,3 +248,69 @@ test("a request with no credential is refused for Matrix media and asked of the 
   assert.deepEqual(await resolveUpstream(refusing, "u", { authorization: null, cookie: null }), { ok: false, status: 401 });
 });
 
+
+// -- leak audit 2026-10-01 ---------------------------------------------------
+
+test("F-G2: the gate is asked WITH the edge secret and the reader's address", async () => {
+  let seen = null;
+  const fake = async (url, init) => { seen = init.headers; return { status: 200, json: async () => ({ url: "https://r2/x?sig" }) }; };
+  const r = await resolveUpstream(fake, "https://mxc/booru/x.png", { cookie: "a=b" }, { secret: "k", clientIp: "203.0.113.9" });
+  assert.equal(r.ok, true);
+  assert.equal(seen["X-Fourier-Edge"], "k");
+  assert.equal(seen["X-Fourier-Client-IP"], "203.0.113.9");
+  // No secret, no address either: the address is only believed alongside it.
+  await resolveUpstream(fake, "u", { cookie: "a=b" }, { clientIp: "203.0.113.9" });
+  assert.equal(seen["X-Fourier-Edge"], undefined);
+  assert.equal(seen["X-Fourier-Client-IP"], undefined);
+});
+
+test("F-G2: a gate that withholds the URL from this Worker is a 502, named as withheld", async () => {
+  const fake = async () => ({ status: 200, json: async () => ({ allowed: true, released: false, error: "x" }) });
+  assert.deepEqual(await resolveUpstream(fake, "u", { cookie: "a=b" }, { secret: "wrong" }), { ok: false, status: 502, withheld: true });
+});
+
+test("F-G1: a booru allow lives 60 s at the edge, a Matrix allow 240 s", () => {
+  assert.equal(decisionTtl("booru"), 60);
+  assert.equal(decisionTtl("download"), 240);
+  assert.equal(decisionTtl("thumbnail"), 240);
+});
+
+// The whole fetch handler, with Cloudflare's globals faked: what the GATE is
+// sent (secret on, client-supplied edge headers never copied), and that a
+// booru allow is cached for 60 s.
+test("F-G1/F-G2 end to end: the Worker sends its own secret, never the client's, and caches a booru allow 60 s", async () => {
+  const puts = [];
+  const gateCalls = [];
+  const store = new Map();
+  globalThis.caches = { default: {
+    match: async (req) => store.get(typeof req === "string" ? req : req.url) || undefined,
+    put: async (req, res) => { puts.push({ url: req.url, cc: res.headers.get("Cache-Control") }); },
+  } };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.startsWith("https://mxc.example/")) {
+      gateCalls.push({ url, headers: init.headers });
+      return new Response(JSON.stringify({ url: "https://r2.example/media/" + "a".repeat(32) + ".png?X-Amz-Signature=s" }), { status: 200 });
+    }
+    return new Response("PNGBYTES", { status: 200, headers: { "Content-Type": "image/png" } });
+  };
+  try {
+    const req = new Request("https://booru.41chan.net/fourier/booru/" + "a".repeat(32) + ".png", {
+      headers: { Cookie: "_danbooru2_session=s", "CF-Connecting-IP": "203.0.113.9", "X-Fourier-Edge": "client-forged", "X-Fourier-Client-IP": "6.6.6.6" },
+    });
+    const waits = [];
+    const res = await worker.fetch(req, { FOURIER_AUTH_BASE: "https://mxc.example", MEDIA_EDGE_SECRET: "real-secret" }, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), "PNGBYTES");
+    assert.equal(gateCalls.length, 1);
+    assert.equal(gateCalls[0].headers["X-Fourier-Edge"], "real-secret");
+    assert.equal(gateCalls[0].headers["X-Fourier-Client-IP"], "203.0.113.9");
+    const decision = puts.find((p) => p.url.startsWith("https://authz.fourier.internal/"));
+    assert.equal(decision.cc, "max-age=60");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete globalThis.caches;
+  }
+});

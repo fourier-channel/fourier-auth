@@ -37,6 +37,19 @@
 //
 // A stale-unrenewable session is AMBER: it will be refused on its next Matrix
 // picture, and it is fixable by that reader signing in again.
+//
+// The booru door (leak audit 2026-10-01) adds two:
+//
+//   booru_unavailable  the booru could not be asked whether a post is
+//                      visible, so booru media was refused (fail closed). RED:
+//                      every booru picture fails while it lasts.
+//   booru_hidden       an md5 asked for that no visible post carries -- a
+//                      jailed, deleted or never-posted image. The gate working;
+//                      counted so a scan of the jail shows up, never flagged.
+//
+// WHO SEES THE DETAIL (F-G5). The "last:" strings name mxc ids and Matrix user
+// ids. health({ detail: false }) leaves them out -- levels, labels and counts
+// only -- and that is what a public caller of /healthz gets.
 
 const WINDOW_MS = 10 * 60 * 1000;
 const CAP = 5000;
@@ -44,7 +57,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [] };
     this.last = {};
   }
 
@@ -66,6 +79,8 @@ class GateSignals {
   }
   staleUnrenewable(detail) { this.#note("stale_unrenewable", detail); }
   refreshFailed(detail) { this.#note("refresh_failures", detail); }
+  booruUnavailable(detail) { this.#note("booru_unavailable", detail); }
+  booruHidden(detail) { this.#note("booru_hidden", detail); }
 
   counts(at = this.now()) {
     const out = {};
@@ -80,15 +95,17 @@ class GateSignals {
   }
 
   /** The health document's checks and overall level, for /healthz. */
-  health(at = this.now()) {
+  health(at = this.now(), { detail = true } = {}) {
     const c = this.counts(at);
+    // The last thing seen, or nothing at all for a caller not allowed detail.
+    const last = (k) => (detail ? `; last: ${this.last[k] || "?"}` : "");
     const checks = [
       {
         id: "session-refusals",
         label: "signed-in readers refused",
         level: c.session_refusals > 0 ? "red" : "green",
         detail: c.session_refusals > 0
-          ? `${c.session_refusals} refusal(s) to a session whose token sees no room in 10 min; last: ${this.last.session_refusals || "?"}`
+          ? `${c.session_refusals} refusal(s) to a session whose token sees no room in 10 min${last("session_refusals")}`
           : "none in 10 min",
       },
       {
@@ -96,28 +113,42 @@ class GateSignals {
         label: "images asked for that are in no room",
         level: c.unplaced_media > 0 ? "amber" : "green",
         detail: c.unplaced_media > 0
-          ? `${c.unplaced_media} in 10 min (deleted by its poster, or in an encrypted room the client did not name); last: ${this.last.unplaced_media || "?"}`
+          ? `${c.unplaced_media} in 10 min (deleted by its poster, or in an encrypted room the client did not name)${last("unplaced_media")}`
           : "none in 10 min",
       },
       {
         id: "member-refusals",
         label: "readers refused a room they are not in",
         level: "green",
-        detail: `${c.member_refusals} in 10 min -- the gate answering correctly${c.member_refusals > 0 ? `; last: ${this.last.member_refusals || "?"}` : ""}`,
+        detail: `${c.member_refusals} in 10 min -- the gate answering correctly${c.member_refusals > 0 ? last("member_refusals") : ""}`,
       },
       {
         id: "refresh-failures",
         label: "token refresh refused by MAS",
         level: c.refresh_failures > 0 ? "red" : "green",
-        detail: c.refresh_failures > 0 ? `${c.refresh_failures} in 10 min; last: ${this.last.refresh_failures || "?"}` : "none in 10 min",
+        detail: c.refresh_failures > 0 ? `${c.refresh_failures} in 10 min${last("refresh_failures")}` : "none in 10 min",
       },
       {
         id: "stale-unrenewable",
         label: "sessions past their token with no refresh",
         level: c.stale_unrenewable > 0 ? "amber" : "green",
         detail: c.stale_unrenewable > 0
-          ? `${c.stale_unrenewable} in 10 min (a sign-out/in fixes it); last: ${this.last.stale_unrenewable || "?"}`
+          ? `${c.stale_unrenewable} in 10 min (a sign-out/in fixes it)${last("stale_unrenewable")}`
           : "none in 10 min",
+      },
+      {
+        id: "booru-visibility",
+        label: "booru asked which posts a reader may see",
+        level: c.booru_unavailable > 0 ? "red" : "green",
+        detail: c.booru_unavailable > 0
+          ? `${c.booru_unavailable} ask(s) failed in 10 min -- booru media refused while the booru cannot answer${last("booru_unavailable")}`
+          : "answering",
+      },
+      {
+        id: "booru-hidden",
+        label: "booru media refused: no visible post",
+        level: "green",
+        detail: `${c.booru_hidden} in 10 min -- jailed, deleted or never posted${c.booru_hidden > 0 ? last("booru_hidden") : ""}`,
       },
     ];
     const level = checks.some((x) => x.level === "red") ? "red" : checks.some((x) => x.level === "amber") ? "amber" : "ok";

@@ -30,4 +30,29 @@ function originalRelease(headers) {
   return nativeLoad && mode !== "cors" ? "redirect" : "json";
 }
 
-module.exports = { originalRelease };
+// Hand an authorized, already-presigned URL to the caller -- or withhold it.
+//
+// Only the edge Worker receives the URL (callers.js, leak audit F-G2). Anyone
+// else asked a question the gate is willing to answer -- may this be seen? --
+// and gets exactly that: 200 {allowed: true, released: false}, no URL, no 302,
+// no byte. The refusal of the CREDENTIAL is not a refusal of the decision, and
+// keeping the two apart is what lets the access matrix keep probing the gate
+// from outside without being handed a bearer credential to do it.
+//
+// Every answer is no-store: the presigned URL is short-lived, so neither the
+// envelope nor the 302 may be cached and replayed stale, and a withheld answer
+// must not be cached into a later edge request's way either.
+function sendRelease(req, res, signedUrl, { edge }) {
+  res.set("Cache-Control", "no-store");
+  if (!edge) {
+    return res.json({
+      allowed: true,
+      released: false,
+      error: "media is served through the media edge; this host releases no URLs to direct callers",
+    });
+  }
+  if (originalRelease(req.headers) === "redirect") return res.redirect(302, signedUrl);
+  return res.json({ url: signedUrl });
+}
+
+module.exports = { originalRelease, sendRelease };

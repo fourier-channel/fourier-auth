@@ -24,3 +24,11 @@ FOURIER_AUTH_BASE = "https://mxc.41chan.net"
 # (with Allow-Credentials) instead of the wildcard. chanbooru's error card
 # asks the Worker why an image failed; without this its answer is always 401.
 CREDENTIALED_ORIGINS = "https://booru.41chan.net,https://tc.41chan.net"
+
+# SECRET, not a var, and therefore not in this file: MEDIA_EDGE_SECRET.
+# The gate releases a presigned R2 URL only to a request carrying it in
+# X-Fourier-Edge (leak audit F-G2, 2026-10-01); every other caller of
+# mxc.41chan.net gets the decision and no URL. Same value in the gate's
+# environment (MEDIA_EDGE_SECRET). Set it with
+#   npx wrangler secret put MEDIA_EDGE_SECRET
+# BEFORE the gate that requires it is restarted -- an older gate ignores it.

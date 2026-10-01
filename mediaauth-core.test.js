@@ -9,9 +9,11 @@ const assert = require("node:assert/strict");
 const { createMediaAuth, MediaAuthUnavailable } = require("./mediaauth-core");
 
 function fakes(overrides = {}) {
-  const calls = { siteAsset: 0, mediaRooms: 0, joined: 0, whoami: 0, encrypted: 0 };
+  const calls = { siteAsset: 0, mediaRooms: 0, joined: 0, whoami: 0, encrypted: 0, uploader: 0, uploaderJoined: 0 };
   const cache = new Map();
   const deps = {
+    queryUploader: async () => { calls.uploader++; return "@up:x"; },
+    queryUploaderJoined: async () => { calls.uploaderJoined++; return true; },
     queryIsSiteAsset: async () => { calls.siteAsset++; return false; },
     queryMediaRooms: async () => { calls.mediaRooms++; return ["!room:x"]; },
     queryIsEncrypted: async () => { calls.encrypted++; return false; },
@@ -122,8 +124,8 @@ test("empty room lists are not cached; site-asset booleans are cached wrapped", 
   const { deps, cache } = fakes({ queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!r:x"] });
   const auth = createMediaAuth(deps);
   await auth.checkMediaAccess("tok", "41chan.net", "m");
-  assert.equal(cache.has("mediarooms:mxc://41chan.net/m"), false, "an empty resolution must not stick");
-  assert.deepEqual(cache.get("siteasset:mxc://41chan.net/m"), { v: false });
+  assert.equal(cache.has("mediarooms2:mxc://41chan.net/m"), false, "an empty resolution must not stick");
+  assert.deepEqual(cache.get("siteasset2:mxc://41chan.net/m"), { v: false });
 });
 
 // A cached list only grows stale in one direction -- it misses rooms -- so a
@@ -218,4 +220,66 @@ test("the tracked SQL declares the four indexes the gate relies on", () => {
   for (const n of ["event_json_content_url_idx", "event_json_content_avatar_url_idx", "event_json_content_thumbnail_url_idx", "events_site_asset_types_idx"]) {
     assert.ok(names.includes(n), n);
   }
+});
+
+// -- leak audit 2026-10-01: F-G3 (who put it there) and F-G4 (the hint) -----
+//
+// The SQL that applies the uploader rule is exercised against a real Postgres
+// in the session that wrote it (see the commit); these pin the core's half:
+// that it ASKS with the uploader, keys the cache so pre-fix answers are not
+// reused, and that the encrypted-room hint needs the uploader in that room.
+
+test("F-G3: the site-asset and room questions are asked WITH the media's uploader", async () => {
+  const seen = { siteAsset: null, mediaRooms: null };
+  const { deps } = fakes({
+    queryUploader: async (server, id) => (server === "41chan.net" && id === "dm1" ? "@victim:41chan.net" : null),
+    queryIsSiteAsset: async (mxc, uploader, server) => { seen.siteAsset = [mxc, uploader, server]; return false; },
+    queryMediaRooms: async (mxc, uploader) => { seen.mediaRooms = [mxc, uploader]; return []; },
+  });
+  await createMediaAuth(deps).decideMediaAccess("tok", "41chan.net", "dm1");
+  assert.deepEqual(seen.siteAsset, ["mxc://41chan.net/dm1", "@victim:41chan.net", "41chan.net"]);
+  assert.deepEqual(seen.mediaRooms, ["mxc://41chan.net/dm1", "@victim:41chan.net"]);
+});
+
+test("F-G3: answers cached before the uploader rule are never read back", async () => {
+  // A pre-fix entry says "site asset". Read under the old key it would let the
+  // attacker in for six hours after the deploy that closes the hole.
+  const { deps, cache } = fakes({ queryIsSiteAsset: async () => false, fetchJoinedRooms: async () => ["!mine:x"], queryMediaRooms: async () => ["!dm:x"] });
+  cache.set("siteasset:mxc://41chan.net/dm1", { v: true });
+  cache.set("mediarooms:mxc://41chan.net/dm1", ["!mine:x"]);
+  const d = await createMediaAuth(deps).decideMediaAccess("tok", "41chan.net", "dm1");
+  assert.equal(d.allowed, false, "the stale pre-fix answers must not decide");
+});
+
+test("F-G4: the encrypted-room hint needs the uploader to have been in that room", async () => {
+  const base = { queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!enc:x"], queryIsEncrypted: async () => true };
+  const inRoom = createMediaAuth(fakes({ ...base, queryUploaderJoined: async (room, who) => room === "!enc:x" && who === "@up:x" }).deps);
+  assert.equal(await inRoom.checkMediaAccess("tok", "41chan.net", "m", { roomId: "!enc:x" }), true, "a member of the room it was posted in still sees it");
+  // The attack: any member of ANY encrypted room names it for an unplaced mxc
+  // (a DM attachment, a redacted image) whose uploader was never there.
+  const elsewhere = createMediaAuth(fakes({ ...base, queryUploaderJoined: async () => false }).deps);
+  assert.equal(await elsewhere.checkMediaAccess("tok", "41chan.net", "m", { roomId: "!enc:x" }), false);
+  // No uploader record (remote or unknown): the hint proves nothing.
+  const unknown = createMediaAuth(fakes({ ...base, queryUploader: async () => null }).deps);
+  assert.equal(await unknown.checkMediaAccess("tok", "41chan.net", "m", { roomId: "!enc:x" }), false);
+});
+
+test("F-G4: an uploader who joins the room after a refusal is not refused for the cache's life", async () => {
+  let joined = false;
+  const { deps, calls } = fakes({
+    queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!enc:x"], queryIsEncrypted: async () => true,
+    queryUploaderJoined: async () => { calls.uploaderJoined++; return joined; },
+  });
+  const auth = createMediaAuth(deps);
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "m", { roomId: "!enc:x" }), false);
+  joined = true;
+  assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "m", { roomId: "!enc:x" }), true, "a no is never cached");
+});
+
+test("the tracked grants SQL declares the two tables the uploader rule reads", () => {
+  const { declaredGrantTables } = require("./mediaauth-core");
+  const fs = require("node:fs");
+  const tables = declaredGrantTables(fs.readFileSync(require.resolve("./db/synapse-grants.sql"), "utf8"));
+  assert.deepEqual(tables.sort(), ["local_media_repository", "room_memberships"]);
+  assert.deepEqual(declaredGrantTables("-- GRANT SELECT ON nope TO x\nGRANT SELECT ON yes TO fourier_auth_ro;"), ["yes"]);
 });

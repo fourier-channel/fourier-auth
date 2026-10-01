@@ -32,23 +32,31 @@ Bridge) and technetium.
    and answers the question "may this user see this media?" by reading
    Synapse's own Postgres directly: which room the media was posted in,
    whether the user is joined, whether it is a site asset (avatar, room icon,
-   emoji pack) that only needs a valid token. Synapse's HTTP API is used only
-   for `whoami` and `joined_rooms`. Synapse's authenticated-media endpoint is
-   NOT used, because it authenticates the token but does not enforce room
-   membership.
-3. If allowed, the service presigns the object in R2 and answers with a 302
-   to that URL, or a JSON `{url}` envelope for cross-origin fetches (a
-   redirect to R2 from a CORS fetch would arrive with a null origin). It
-   never proxies bytes; there is no fallback to proxying. Thumbnails resolve
-   to an already-stored rendition in R2 at the nearest allowed size.
+   emoji pack) that only needs a valid token. A reference to an mxc counts
+   only when the image's uploader made it, or, for a message, when its sender
+   has been in a room the uploader posted it to (a forward). Synapse's HTTP
+   API is used only for `whoami` and `joined_rooms`. Synapse's
+   authenticated-media endpoint is NOT used, because it authenticates the
+   token but does not enforce room membership. Booru media asks a different
+   authority -- the booru, whether a post the reader may see carries that
+   md5.
+3. If allowed, and the caller is the edge Worker (it proves that with
+   `MEDIA_EDGE_SECRET`), the service presigns the object in R2 and answers
+   with a 302 to that URL, or a JSON `{url}` envelope for cross-origin
+   fetches (a redirect to R2 from a CORS fetch would arrive with a null
+   origin). Any other caller gets the decision without a URL. It never
+   proxies bytes; there is no fallback to proxying. Thumbnails resolve to an
+   already-stored rendition in R2 at the nearest allowed size.
 4. In production a Cloudflare Worker sits in front (see `worker/`): it asks
    this service for the decision, caches allows briefly at the edge, and
    streams the object from R2 itself. This service is then the oracle, not
    the path the bytes take.
 
 Decisions are cached in Redis (site-asset, media-room and encryption facts
-for six hours; joined rooms for five minutes, which is the revocation window),
-with single-flight coalescing and credentials hashed before they become keys.
+for six hours; joined rooms for five minutes, which is the revocation window;
+booru post visibility for two minutes when visible and twenty seconds when
+not), with single-flight coalescing, booru asks batched twenty md5s to a
+query, and credentials hashed before they become keys.
 
 Storage authority is R2. Authorization authority is this service. Synapse is
 the source of the facts it reads.
@@ -76,11 +84,15 @@ early July and the later changes are documented in code headers and in
 ## Requirements
 
 - A Synapse homeserver, with a **read-only Postgres role on Synapse's own
-  database**. The service reads `profiles`, `events`, `event_json` and
-  `current_state_events` directly, and needs the four indexes in
-  `db/synapse-indexes.sql` (`tools/ensure-synapse-indexes.sh` applies them).
-  Without them every check is a sequential scan and the pool drains into
-  503s. The service verifies the indexes at boot and logs loudly if absent.
+  database**. The service reads `profiles`, `events`, `event_json`,
+  `current_state_events`, `local_media_repository` and `room_memberships`
+  directly. It needs the four indexes in `db/synapse-indexes.sql` and the
+  two grants in `db/synapse-grants.sql`; `tools/ensure-synapse-indexes.sh`
+  applies and verifies both. Without the indexes every check is a sequential
+  scan and the pool drains into 503s; without the grants every Matrix media
+  decision fails with 503. The service checks both at boot, logs loudly if
+  either is missing, and reports them on `/healthz`.
+- The booru (chanbooru) reachable on the docker network, for booru media.
 - An **R2 bucket** holding the media, with credentials that can presign.
 - A MAS instance as the OIDC provider, with a client registered for this
   service.
@@ -140,6 +152,21 @@ not a CORS tweak. Empty means no cross-origin clients.
 Bearer) and `MEDIA_ORIGINAL_RELEASE` (leave at the default; `proxy` is an
 escape hatch that must stay off here).
 
+`BOORU_INTERNAL_URL` (default `http://danbooru:3000`): the booru's Rails app
+on the docker network. `/booru/<md5>` serves an original or a variant only
+when the booru's own posts API, asked as an anonymous reader (and, when that
+says no, as the reader's own `_danbooru2_session`), returns a post carrying
+that md5. Jailed, deleted and never-posted images answer 404. The booru being
+unreachable is a 503, never a yes.
+
+`MEDIA_EDGE_SECRET`: the shared secret the Cloudflare Worker sends in
+`X-Fourier-Edge`. Presigned R2 URLs are released only to a request carrying
+it; every other caller of either media route gets the decision as
+`200 {allowed: true, released: false}` with no URL, no 302 and no byte.
+Unset means nobody is the edge: every picture behind the Worker fails, and
+boot and `/healthz` say so. The Worker holds the same value as a Worker
+secret of the same name.
+
 `CANON_URL` (default `http://fourier-tunnel:8011`): fourier-tunnel's canon
 service. Every local Matrix original is served as its ONE stripped file
 (`media/<md5>.<ext>`, found through `index/local/<mediaId>.json`); an original
@@ -163,7 +190,7 @@ and `/verify`.
     set -a; . ./.env; set +a; node index.js
     curl -s http://127.0.0.1:8010/healthz
 
-Tests: `npm test` (`node --test`, the seven `*.test.js` files).
+Tests: `npm test` (`node --test`: every `*.test.js` here and the Worker's `worker/*.test.mjs`; the count is whatever it prints).
 `coherence.gate.yaml` declares the same. The Dockerfile copies `*.js` as a
 glob on purpose: an explicit allowlist crash-looped the container three
 times when a module was added.
@@ -189,9 +216,13 @@ times when a module was added.
   when denied, 503 with `Retry-After: 1` when authorization is unavailable
   (distinct from denied), 404 `M_NOT_FOUND` when R2 lacks the object.
 - `GET /booru/:file` -- booru-native objects (`media/<md5><ext>`,
-  `variants/<md5>/<size>` at 180, 360, 720), session-gated; `?dl=1` signs a
+  `variants/<md5>/<size>` at 180, 360, 720), released only when a post the
+  requester may see carries that md5 (asked of the booru; 404 otherwise, 503
+  when the booru cannot be asked); `?dl=1` signs a
   `Content-Disposition: attachment` into the presigned URL.
-- `GET /healthz` -- service + Redis health.
+- `GET /healthz` -- the health document: level, checks, counts. Public
+  callers get levels and counts only; a caller on the box or the tailnet that
+  came through no proxy also gets each check's last-seen detail.
 
 ---
 
@@ -204,7 +235,11 @@ times when a module was added.
 - The one credential this design deliberately puts in a URL is the presigned
   R2 URL: several hundred bytes that land in the DOM, history and devtools
   for the presign TTL. `MEDIA-URLS.md` records why that trade was made.
-- `?room_id=` widens the membership check only for genuinely encrypted rooms.
+- `?room_id=` widens the membership check only for genuinely encrypted rooms
+  that the image's uploader has been a member of.
+- Presigned URLs reach the edge Worker only (`MEDIA_EDGE_SECRET`). The gate
+  is publicly reachable at its own hostname, and a direct caller there gets
+  no URL, no redirect and no byte.
 
 ---
 

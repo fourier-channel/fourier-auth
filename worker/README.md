@@ -39,10 +39,14 @@ of. Only the decision crosses 41chan (a few hundred bytes); the image does not.
 Bytes are edge-cached keyed on the R2 object, and the cached copy is marked
 public-immutable in Cloudflare's shared cache: two authorized readers share
 one copy, and an unauthorized one never reaches the line that serves it.
-**Allows are cached at the edge for 240 seconds** (operator ruling
-2026-08-16), keyed on a hash of the credential plus the authorization URL;
-denials are never cached. A user who leaves a room can read for at most
-four more minutes.
+**Allows are cached at the edge** -- 240 seconds for Matrix media (operator
+ruling 2026-08-16), 60 seconds for booru media -- keyed on a hash of the
+credential plus the authorization URL; denials are never cached. A user who
+leaves a room can read for at most four more minutes. A booru post jailed or
+deleted after a reader's allow was cached keeps serving that reader for at
+most the 60 s here plus the gate's 120 s visibility cache: about three
+minutes. The edge byte cache does not extend that, because it is reached
+only after an allow.
 
 Only a path the Worker does not recognise is passed to the origin untouched.
 Everything it does recognise fails CLOSED: a denial, an unreachable gate, or
@@ -60,6 +64,21 @@ Worker cannot look like a working one.
 Two non-secret variables shape it: `FOURIER_AUTH_BASE` (where the gate is)
 and `CREDENTIALED_ORIGINS` (sibling origins that get their Origin echoed with
 `Allow-Credentials: true` instead of the wildcard).
+
+One SECRET: `MEDIA_EDGE_SECRET`, set with `npx wrangler secret put
+MEDIA_EDGE_SECRET`, never in `wrangler.toml`. The Worker sends it to the gate
+in `X-Fourier-Edge`, with the reader's `CF-Connecting-IP` in
+`X-Fourier-Client-IP`; both headers are built by the Worker, never copied
+from the reader's request. The gate releases a presigned URL only to a
+request carrying the secret (leak audit F-G2, 2026-10-01): it is publicly
+reachable at `mxc.41chan.net`, and before this it handed the same URL --
+R2 account id, bucket and access key id in `X-Amz-Credential` -- to anyone
+who asked it directly. The gate answers a request without the secret with
+`released: false`; the Worker logs that as the gate WITHHOLDING the URL and
+answers 502, so a missing or mismatched secret names itself. The Worker
+sends the secret when it has one and still asks when it does not, because an
+older gate needs none: that is what lets the secret go in before the gate
+that requires it.
 
 ## Deployed
 
