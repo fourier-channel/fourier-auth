@@ -165,11 +165,22 @@ async function readIndex(s3, bucket, mediaId) {
  * than ever falling back to Synapse's unstripped object.
  */
 async function canonicalOriginalKey(s3, bucket, { mediaId, cache, askCanon }) {
+  const { idx } = await localIndex(s3, bucket, { mediaId, cache, askCanon });
+  if ((idx.kind === "canonical" || idx.kind === "source") && typeof idx.key === "string" && idx.key) return idx.key;
+  throw new OriginalUnavailable("CANON_UNAVAILABLE", `the index for ${mediaId} names no file`);
+}
+
+// canon's index for a local media id, asking canon to make it when there is
+// none. `asked`: whether canon was asked just now. Throws OriginalUnavailable
+// (GONE, WITHHELD, CANON_UNAVAILABLE) exactly as canonicalOriginalKey does.
+async function localIndex(s3, bucket, { mediaId, cache, askCanon }) {
   const cacheKey = `canonidx:${mediaId}`;
   let idx = cache ? await cache.get(cacheKey).catch(() => null) : null;
   if (!idx) idx = await readIndex(s3, bucket, mediaId);
+  let asked = false;
   if (!idx) {
     try {
+      asked = true;
       idx = await askCanon(mediaId);
     } catch (err) {
       // canon's 404 is permanent (unknown, quarantined, or gone from the bucket):
@@ -183,8 +194,7 @@ async function canonicalOriginalKey(s3, bucket, { mediaId, cache, askCanon }) {
   if (idx.kind === "refused") {
     throw new OriginalUnavailable("WITHHELD", `withheld: its generation data could not be removed (${idx.reason || "no reason given"})`);
   }
-  if ((idx.kind === "canonical" || idx.kind === "source") && typeof idx.key === "string" && idx.key) return idx.key;
-  throw new OriginalUnavailable("CANON_UNAVAILABLE", `the index for ${mediaId} names no file`);
+  return { idx, asked };
 }
 
 // canon.js answers the gate over the docker network (fourier-tunnel's
@@ -255,7 +265,9 @@ async function booruVariantKey(s3, bucket, { mediaId, thumbSize, cache, fresh = 
     }
     if (cache && idx.kind) await cache.set(idxCacheKey, idx, INDEX_TTL).catch(() => {});
   }
-  const md5s = [...new Set([idx.md5, idx.rawMd5, idx.raw_md5].filter(isMd5))];
+  // idx.booru.md5: where canon found the booru holding it when that is neither
+  // md5 canon computed (a post made under older strip rules).
+  const md5s = [...new Set([idx.md5, idx.rawMd5, idx.raw_md5, idx.booru && idx.booru.md5].filter(isMd5))];
   for (const md5 of md5s) {
     const ck = `variants:${md5}`;
     let keys = !fresh && cache ? await cache.get(ck).catch(() => null) : null;
@@ -293,16 +305,39 @@ async function resolveR2Key(s3, bucket, { serverName, mediaId, isLocal, thumbSiz
     if (cache) await cache.set(cacheKey, names, THUMB_KEYS_TTL).catch(() => {});
   }
   if (names.length === 0) {
-    // No Synapse rendition either. Before the caller falls back to asking
-    // Synapse -- which would RENDER one, re-creating the duplicate -- look for
-    // the booru's variants again past any cached "no": the image may have been
-    // posted since.
-    if (isLocal) return booruVariantKey(s3, bucket, { mediaId, thumbSize, cache, fresh: true });
-    return null;
+    // No Synapse rendition either. Look for the booru's variants again past
+    // any cached "no" -- the image may have been uploaded since -- and then
+    // ask canon (thumbnailOfLastResort). Never Synapse, which would RENDER
+    // one: a second set of renditions.
+    if (!isLocal) return null;
+    const variant = await booruVariantKey(s3, bucket, { mediaId, thumbSize, cache, fresh: true });
+    if (variant || !askCanon) return variant;
+    return thumbnailOfLastResort(s3, bucket, { mediaId, thumbSize, cache, askCanon });
   }
 
   const chosen = pickThumbnail(names, thumbSize, method);
   return chosen ? chosen.key : null;
+}
+
+// NO RENDITION ANYWHERE. Synapse runs with dynamic_thumbnails, so it renders
+// nothing at upload, and nothing it would render on demand is ever asked of it:
+// the Worker sends every thumbnail request here and this gate has no Synapse
+// fallback. So a new image's first thumbnail -- a DM picture, an avatar --
+// arrives before anything has rendered it. Ask canon, which makes the image
+// its one file AND gives it a booru upload, waiting for the variants
+// (fourier-tunnel canon.js ensureBooruRecord); then look once more. If the
+// booru still has none -- it refused the file, or is still rendering -- the
+// image itself is the thumbnail: its one stripped file, which every client
+// scales. Never Synapse's object. Not an image (canon left it where it is):
+// no thumbnail, as before.
+async function thumbnailOfLastResort(s3, bucket, { mediaId, thumbSize, cache, askCanon }) {
+  const { idx, asked } = await localIndex(s3, bucket, { mediaId, cache, askCanon });
+  if (idx.kind !== "canonical" || typeof idx.key !== "string" || !idx.key) return null;
+  if (asked) {
+    const variant = await booruVariantKey(s3, bucket, { mediaId, thumbSize, cache, fresh: true });
+    if (variant) return variant;
+  }
+  return idx.key;
 }
 
 module.exports = {

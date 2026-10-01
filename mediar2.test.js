@@ -164,12 +164,17 @@ test("an index naming no file is an error, not a guess", async () => {
   await assert.rejects(() => canonicalOriginalKey(s3, "b", { mediaId: MEDIA, askCanon: async () => ({}) }), OriginalUnavailable);
 });
 
-test("thumbnails and remote originals never ask canon", async () => {
+test("remote originals never ask canon, and a thumbnail asks only when no rendition of any kind answers", async () => {
   let asked = 0;
   const askCanon = async () => { asked++; return {}; };
-  const s3 = fakeS3({});
-  assert.equal(await resolveR2Key(s3, "b", { serverName: "x.org", mediaId: MEDIA, isLocal: false, askCanon }), remoteOriginalKey("x.org", MEDIA));
-  await resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: MEDIA, isLocal: true, thumbSize: 360, askCanon });
+  assert.equal(await resolveR2Key(fakeS3({}), "b", { serverName: "x.org", mediaId: MEDIA, isLocal: false, askCanon }), remoteOriginalKey("x.org", MEDIA));
+  // A Synapse rendition still there (an image canonical before the booru held
+  // every image) answers without canon.
+  const withRendition = { async send(cmd) {
+    if (cmd instanceof GetObjectCommand) throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" });
+    return { Contents: [{ Key: `local_thumbnails/AG/TQ/${MEDIA.slice(4)}/320-240-image-jpeg-scale` }] };
+  } };
+  assert.match(await resolveR2Key(withRendition, "b", { serverName: "41chan.net", mediaId: MEDIA, isLocal: true, thumbSize: 360, askCanon }), /320-240/);
   assert.equal(asked, 0);
 });
 
@@ -281,4 +286,82 @@ test("remote media never looks for booru variants", async () => {
   const key = await resolveR2Key(s3, "b", { serverName: "m.org", mediaId: "AGTQx", isLocal: false, thumbSize: 320 });
   assert.match(key, /remote_thumbnail/);
   assert.ok(!s3.asked.some((a) => a.startsWith("get ") || a.includes("variants/")));
+});
+
+// DYNAMIC THUMBNAILS (Synapse renders nothing at upload; operator decision
+// 2026-10-01). A new image's first thumbnail finds no rendition of any kind:
+// canon is asked, and gives it a booru upload whose variants are then served;
+// failing that, the image's one file. Never Synapse's object, and never a
+// broken thumbnail.
+function liveBucket(objects) {
+  const asked = [];
+  return {
+    asked,
+    objects,
+    async send(cmd) {
+      if (cmd instanceof GetObjectCommand) {
+        asked.push(`get ${cmd.input.Key}`);
+        const body = objects[cmd.input.Key];
+        if (!body) throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" });
+        return { Body: { transformToByteArray: async () => Buffer.from(JSON.stringify(body)) } };
+      }
+      asked.push(`list ${cmd.input.Prefix}`);
+      return { Contents: Object.keys(objects).filter((k) => k.startsWith(cmd.input.Prefix)).map((Key) => ({ Key })) };
+    },
+  };
+}
+const NEW_ID = "NewDmImageNewDmImageNewD";
+const NEW_IDX = `index/local/${NEW_ID}.json`;
+
+test("no rendition anywhere and no index: canon is asked, and the variants its booru upload rendered are the thumbnail", async () => {
+  const s3 = liveBucket({});
+  const cache = memCache();
+  let asked = 0;
+  const askCanon = async (id) => {
+    asked++;
+    // What canon does: the one file, the index, the booru upload -> variants.
+    const idx = { kind: "canonical", key: `media/${MD5}.png`, md5: MD5, raw_md5: RAW, booru: { status: "completed", media_asset_id: 9 } };
+    s3.objects[`index/local/${id}.json`] = idx;
+    for (const k of VARIANTS) s3.objects[k] = {};
+    return idx;
+  };
+  const key = await resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: NEW_ID, isLocal: true, thumbSize: 96, cache, askCanon });
+  assert.equal(asked, 1);
+  assert.equal(key, `variants/${MD5}/180x180.jpg`);
+  assert.ok(!s3.asked.some((a) => a.includes("local_content/")), "Synapse's original is never asked for");
+});
+
+test("no rendition and the booru holds no variants: the thumbnail is the image's one file, never Synapse's", async () => {
+  const s3 = liveBucket({ [NEW_IDX]: { kind: "canonical", key: `media/${MD5}.png`, md5: MD5, booru: { status: "refused", reason: "File type is not supported" } } });
+  let asked = 0;
+  const key = await resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: NEW_ID, isLocal: true, thumbSize: 320, askCanon: async () => { asked++; return {}; } });
+  assert.equal(key, `media/${MD5}.png`);
+  assert.equal(asked, 0, "an index already there needs no canon call");
+});
+
+test("no rendition of something that is not an image: still no thumbnail; a refused image is WITHHELD", async () => {
+  const source = liveBucket({ [NEW_IDX]: { kind: "source", key: `local_content/Ne/wD/${NEW_ID.slice(4)}` } });
+  assert.equal(await resolveR2Key(source, "b", { serverName: "41chan.net", mediaId: NEW_ID, isLocal: true, thumbSize: 96, askCanon: async () => ({}) }), null);
+  const refused = liveBucket({ [NEW_IDX]: { kind: "refused", reason: "AVIF with an Exif item" } });
+  await assert.rejects(
+    () => resolveR2Key(refused, "b", { serverName: "41chan.net", mediaId: NEW_ID, isLocal: true, thumbSize: 96, askCanon: async () => ({}) }),
+    (err) => err instanceof OriginalUnavailable && err.code === "WITHHELD",
+  );
+});
+
+test("canon unreachable for a thumbnail: CANON_UNAVAILABLE (a 503 the client retries), never a fallback", async () => {
+  const s3 = liveBucket({});
+  await assert.rejects(
+    () => resolveR2Key(s3, "b", { serverName: "41chan.net", mediaId: NEW_ID, isLocal: true, thumbSize: 96, askCanon: async () => { throw new Error("ECONNREFUSED"); } }),
+    (err) => err instanceof OriginalUnavailable && err.code === "CANON_UNAVAILABLE",
+  );
+});
+
+test("the booru holding a post under a third md5 (older strip rules): canon records it, and its variants are served", async () => {
+  const THIRD = "0123456789abcdef0123456789abcdef";
+  const s3 = bucket({
+    index: { kind: "canonical", key: `media/${MD5}.jpg`, md5: MD5, raw_md5: RAW, booru: { status: "held", md5: THIRD } },
+    variants: { [`variants/${THIRD}/`]: [`variants/${THIRD}/360x360.jpg`] },
+  });
+  assert.equal(await booruVariantKey(s3, "b", { mediaId: "x", thumbSize: 320 }), `variants/${THIRD}/360x360.jpg`);
 });
