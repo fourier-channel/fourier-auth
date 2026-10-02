@@ -52,7 +52,7 @@ function makeBooruHandler(d) {
 
     // The reader, as the booru knows them: their own booru session, and the
     // address the Worker vouches for. Asked only when anonymous is refused.
-    const booruSession = req.cookies && req.cookies[d.booruCookieName];
+    const booruSession = booruSessionAsSent(req, d.booruCookieName);
     const viewer = booruSession ? { sessionCookie: booruSession, clientIp: d.clientIp(req.headers) } : null;
 
     try {
@@ -103,6 +103,31 @@ function makeBooruHandler(d) {
       return res.status(502).json({ error: "could not release media" });
     }
   };
+}
+
+
+// THE BOORU SESSION EXACTLY AS THE BROWSER SENT IT. cookie-parser hands the
+// route a URL-DECODED value, and Rails' encrypted session is base64 that the
+// browser carries escaped (%2B, %2F, %3D). Forwarded decoded, its "+" reached
+// Rack as a literal "+", which Rack's cookie parsing reads as a space: the
+// session would not decrypt, every reader was anonymous to the booru, and Gold
+// readers were refused restricted images they may see (2026-10-02, live).
+// The raw header is the truth; the re-encode is for a caller that has only the
+// parsed jar, and produces the same escaping Rack would.
+function booruSessionAsSent(req, name) {
+  const header = req.headers && req.headers.cookie;
+  if (typeof header === "string") {
+    for (const part of header.split(";")) {
+      const i = part.indexOf("=");
+      if (i < 0) continue;
+      if (part.slice(0, i).trim() === name) {
+        const v = part.slice(i + 1).trim();
+        return v || undefined;
+      }
+    }
+  }
+  const parsed = req.cookies && req.cookies[name];
+  return typeof parsed === "string" && parsed ? encodeURIComponent(parsed) : undefined;
 }
 
 module.exports = { makeBooruHandler };

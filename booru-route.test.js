@@ -117,6 +117,22 @@ test("F-G1: the reader's own booru session is offered to the booru, with the add
   assert.equal(asked[1].viewer, null);
 });
 
+test("F-G1: the booru session is forwarded exactly as the browser sent it, never URL-decoded", async () => {
+  // Live 2026-10-02: Gold readers were refused restricted images. Rails' session
+  // cookie is escaped base64; cookie-parser decodes %2B to "+", and Rack reads a
+  // literal "+" in a cookie as a space, so the forwarded session never decrypted.
+  const { handler, asked } = harness({ clientIp: () => "203.0.113.9" });
+  const sent = "QUJD%2Bk%2Fz%3D%3D--aXY%3D--dGFn%3D%3D";
+  await call(handler, `${JAILED}.jpg`, {
+    headers: { ...EDGE, cookie: `fourier_session=fs; _danbooru2_session=${sent}; other=1` },
+    cookies: { _danbooru2_session: decodeURIComponent(sent), fourier_session: "fs", other: "1" },
+  });
+  assert.equal(asked[0].viewer.sessionCookie, sent);
+  // A caller with only the parsed jar gets Rack's escaping back.
+  await call(handler, `${JAILED}.jpg`, { headers: EDGE, cookies: { _danbooru2_session: decodeURIComponent(sent) } });
+  assert.equal(asked[1].viewer.sessionCookie, sent);
+});
+
 test("F-G1: a Matrix image is still refused at this door before the booru is asked", async () => {
   const { handler, asked } = harness({ isMatrixImage: async () => true });
   const res = await call(handler, `${VISIBLE}.png`, { headers: EDGE });
