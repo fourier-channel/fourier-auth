@@ -65,6 +65,12 @@ Two non-secret variables shape it: `FOURIER_AUTH_BASE` (where the gate is)
 and `CREDENTIALED_ORIGINS` (sibling origins that get their Origin echoed with
 `Allow-Credentials: true` instead of the wildcard).
 
+Booru media forwards only the cookies the gate reads: `fourier_session`,
+`_danbooru2_session`, and at most eight published-page grants
+(`fourier_pub_<32 hex>`), the page named by the request's Referer first so
+the one being read is never the one dropped. That filtered value is also the
+decision-cache credential, so one reader's grant is never another's answer.
+
 One SECRET: `MEDIA_EDGE_SECRET`, set with `npx wrangler secret put
 MEDIA_EDGE_SECRET`, never in `wrangler.toml`. The Worker sends it to the gate
 in `X-Fourier-Edge`, with the reader's `CF-Connecting-IP` in

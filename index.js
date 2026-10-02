@@ -31,6 +31,7 @@ const { originalRelease, sendRelease } = require("./release");
 const { isEdgeCaller, edgeClientIp, healthDetailAllowed } = require("./callers");
 const { createBooruVisibility, booruPostsClient } = require("./booru-visibility");
 const { makeBooruHandler } = require("./booru-route");
+const { createPublicationGrants, samplingPublicationClient, pubHashes } = require("./publication-grants");
 const crypto = require("crypto");
 const { resolveR2Key, canonClient, OriginalUnavailable } = require("./mediar2");
 // fourier-tunnel's canon.js, over the docker network: it makes a Matrix image into
@@ -131,6 +132,18 @@ const booruVisibility = createBooruVisibility({
   cacheGet: cacheGetJson,
   cacheSet: cacheSetJson,
   hashKey: (s) => crypto.createHash("sha256").update(String(s)).digest("hex").slice(0, 32),
+});
+
+// Where sampling answers a published page's data (operator ruling 2026-10-02:
+// a publication is his grant). Sampling listens on the tailnet only and a
+// container cannot reach it there, so this is Caddy's internal door on the
+// danbooru_default bridge gateway, which answers /p/<hash>/data and nothing
+// else (fourier-basis ops/hetzner/caddy, ops/hetzner/firewall/auth-to-sampling.sh).
+const SAMPLING_INTERNAL_URL = process.env.SAMPLING_INTERNAL_URL || "http://172.18.0.1:5181";
+const publicationGrants = createPublicationGrants({
+  fetchPublication: samplingPublicationClient({ axios, baseUrl: SAMPLING_INTERNAL_URL }),
+  cacheGet: cacheGetJson,
+  cacheSet: cacheSetJson,
 });
 
 // What the boot-time schema check found, for /healthz. null until it has run.
@@ -419,6 +432,8 @@ app.get("/booru/:file", makeBooruHandler({
   isMatrixImage,
   originalExists,
   visibility: booruVisibility,
+  pubHashes,
+  publications: publicationGrants,
   presign: (key, disposition) => getSignedUrl(s3, new GetObjectCommand({
     Bucket: R2_BUCKET,
     Key: key,

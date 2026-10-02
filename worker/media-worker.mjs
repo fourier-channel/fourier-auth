@@ -306,6 +306,45 @@ export function refusesAnonymous(parsed) {
   return parsed.kind !== "booru";
 }
 
+/**
+ * The cookies a booru media request forwards to the gate, as one header
+ * value, or null when there are none.
+ *
+ * The gate reads three kinds: fourier_session, the reader's own booru session
+ * (_danbooru2_session), and a published page's grant, fourier_pub_<hash>
+ * (operator ruling 2026-10-02: a publication is his grant; the gate checks it
+ * against the live page). Everything else the browser carries stays here.
+ *
+ * Grant cookies: only well-formed names (32 lowercase hex), at most
+ * MAX_PUB_COOKIES, and the page the picture was requested FROM (its Referer,
+ * /p/<hash>) first -- a reader who has opened many publications must not have
+ * the one in front of them dropped by the cap.
+ *
+ * The result is also the decision-cache credential, so one reader's grant is
+ * never served to another: a different set of grants is a different key.
+ */
+export const MAX_PUB_COOKIES = 8;
+export function booruCookie(cookieHeader, referer) {
+  if (!cookieHeader) return null;
+  const keep = [];
+  const pubs = [];
+  for (const part of String(cookieHeader).split(";")) {
+    const i = part.indexOf("=");
+    if (i <= 0) continue;
+    const name = part.slice(0, i).trim();
+    const value = part.slice(i + 1).trim();
+    if (name === "fourier_session" || name === "_danbooru2_session") keep.push(`${name}=${value}`);
+    else if (/^fourier_pub_[0-9a-f]{32}$/.test(name) && !pubs.some((p) => p.name === name)) pubs.push({ name, value });
+  }
+  const m = /\/p\/([0-9a-f]{32})(?:[/?#]|$)/.exec(String(referer || ""));
+  if (m) {
+    const at = pubs.findIndex((p) => p.name === `fourier_pub_${m[1]}`);
+    if (at > 0) pubs.unshift(...pubs.splice(at, 1));
+  }
+  for (const p of pubs.slice(0, MAX_PUB_COOKIES)) keep.push(`${p.name}=${p.value}`);
+  return keep.length ? keep.join("; ") : null;
+}
+
 /** A Matrix-shaped error, so clients read it the way they read Synapse's. */
 export function deny(status, errcode, error, cors = corsHeaders()) {
   return new Response(JSON.stringify({ errcode, error }), {
@@ -343,7 +382,10 @@ export default {
     // identity and applies the SAME rule. The surface does not get to decide
     // what a user may see; it only decides how it proves who they are.
     const authorization = request.headers.get("Authorization");
-    const cookie = request.headers.get("Cookie");
+    const rawCookie = request.headers.get("Cookie");
+    // Booru media: only the cookies the gate reads, so the decision cache is
+    // keyed by exactly what decides the answer -- see booruCookie.
+    const cookie = parsed.kind === "booru" ? booruCookie(rawCookie, request.headers.get("Referer")) : rawCookie;
     if (!authorization && !cookie && refusesAnonymous(parsed)) {
       return deny(401, "M_MISSING_TOKEN", "Missing access token", cors);
     }

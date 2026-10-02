@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import worker, { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous, denialStatus, decisionTtl } from "./media-worker.mjs";
+import worker, { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous, denialStatus, decisionTtl, booruCookie, MAX_PUB_COOKIES } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -309,6 +309,71 @@ test("F-G1/F-G2 end to end: the Worker sends its own secret, never the client's,
     assert.equal(gateCalls[0].headers["X-Fourier-Client-IP"], "203.0.113.9");
     const decision = puts.find((p) => p.url.startsWith("https://authz.fourier.internal/"));
     assert.equal(decision.cc, "max-age=60");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete globalThis.caches;
+  }
+});
+
+// -- a published page's grant (operator ruling 2026-10-02) -------------------
+
+const PH = (c) => c.repeat(32);
+
+test("PUB: booru media forwards the session, the booru session and well-formed grants -- nothing else", () => {
+  const raw = `cf_clearance=zzz; fourier_session=fs; _danbooru2_session=ds; fourier_pub_${PH("a")}=1; fourier_pub_NOTHEX=1; fourier_pub_${PH("A")}=1; theme=dark`;
+  assert.equal(booruCookie(raw, null), `fourier_session=fs; _danbooru2_session=ds; fourier_pub_${PH("a")}=1`);
+  assert.equal(booruCookie("theme=dark; cf_clearance=z", null), null);
+  assert.equal(booruCookie(null, null), null);
+});
+
+test("PUB: at most 8 grants, and the page the picture was requested from is never the one dropped", () => {
+  const hs = Array.from({ length: 12 }, (_, i) => i.toString(16).padStart(32, "0"));
+  const raw = hs.map((h) => `fourier_pub_${h}=1`).join("; ");
+  assert.equal(MAX_PUB_COOKIES, 8);
+  const plain = booruCookie(raw, null).split("; ");
+  assert.equal(plain.length, 8);
+  const fromPage = booruCookie(raw, `https://booru.41chan.net/sample/p/${hs[11]}`).split("; ");
+  assert.equal(fromPage.length, 8);
+  assert.equal(fromPage[0], `fourier_pub_${hs[11]}=1`, "the Referer's publication goes first");
+});
+
+test("PUB end to end: grants reach the gate, and two readers' different grants are two cache keys", async () => {
+  const puts = [];
+  const gateCalls = [];
+  const store = new Map();
+  globalThis.caches = { default: {
+    match: async (req) => store.get(typeof req === "string" ? req : req.url),
+    put: async (req, res) => { puts.push(req.url); store.set(req.url, new Response(await res.clone().text(), res)); },
+  } };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.startsWith("https://mxc.example/")) {
+      gateCalls.push(init.headers.Cookie || null);
+      return new Response(JSON.stringify({ url: "https://r2.example/variants/" + "c".repeat(32) + "/360x360.jpg?X-Amz-Signature=s" }), { status: 200 });
+    }
+    return new Response("JPEG", { status: 200, headers: { "Content-Type": "image/jpeg" } });
+  };
+  try {
+    const env = { FOURIER_AUTH_BASE: "https://mxc.example", MEDIA_EDGE_SECRET: "k" };
+    const ask = async (cookie) => {
+      const waits = [];
+      const req = new Request("https://booru.41chan.net/fourier/booru/" + "c".repeat(32) + ".jpg?w=360", { headers: { Cookie: cookie } });
+      const r = await worker.fetch(req, env, { waitUntil: (p) => waits.push(p) });
+      await Promise.all(waits);
+      return r.status;
+    };
+    assert.equal(await ask(`theme=dark; fourier_pub_${PH("a")}=1`), 200);
+    assert.equal(gateCalls[0], `fourier_pub_${PH("a")}=1`, "the grant reached the gate; the rest did not");
+    // Same reader again: the cached allow serves it.
+    assert.equal(await ask(`theme=light; fourier_pub_${PH("a")}=1`), 200);
+    assert.equal(gateCalls.length, 1, "a cookie the gate never reads does not split the cache");
+    // A different reader, holding no grant: their own question, never the first reader's answer.
+    await ask("theme=dark");
+    assert.equal(gateCalls.length, 2);
+    assert.equal(gateCalls[1], null);
+    await ask(`fourier_pub_${PH("b")}=1`);
+    assert.equal(gateCalls.length, 3, "another page's grant is another key");
   } finally {
     globalThis.fetch = realFetch;
     delete globalThis.caches;

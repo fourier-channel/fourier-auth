@@ -16,14 +16,20 @@ const { sendRelease } = require("./release");
 const { BooruUnavailable } = require("./booru-visibility");
 const { GateSignals } = require("./gateSignals");
 const { isEdgeCaller } = require("./callers");
+const { pubHashes, PublicationsUnavailable } = require("./publication-grants");
 
 const VISIBLE = "a".repeat(32);
 const JAILED = "b".repeat(32);
 const SECRET = "test-edge-secret";
+// A restricted-tag image: hidden from a signed-out reader by the booru, shown
+// on the live publication PUB.
+const RESTRICTED = "c".repeat(32);
+const PUB = "d".repeat(32);
 
 function harness(over = {}) {
   const presigned = [];
   const asked = [];
+  const pubAsks = [];
   const signals = new GateSignals(() => 1_000_000);
   const logs = [];
   const d = {
@@ -40,11 +46,13 @@ function harness(over = {}) {
     visibility: { sees: async (md5, viewer) => { asked.push({ md5, viewer }); return md5 === VISIBLE; } },
     presign: async (key, disp) => { presigned.push({ key, disp }); return `https://acct.r2.example/bucket/${key}?X-Amz-Credential=AKIA%2Fx&X-Amz-Signature=sig`; },
     isEdge: (headers) => isEdgeCaller(headers, SECRET),
+    pubHashes,
+    publications: { grants: async (md5, hashes) => { pubAsks.push({ md5, hashes }); return hashes.includes(PUB) && md5 === RESTRICTED; } },
     signals,
     log: { error: (m) => logs.push(m), warn: (m) => logs.push(m) },
     ...over,
   };
-  return { handler: makeBooruHandler(d), presigned, asked, signals, logs };
+  return { handler: makeBooruHandler(d), presigned, asked, pubAsks, signals, logs };
 }
 
 function call(handler, file, { query = {}, headers = {}, cookies = {} } = {}) {
@@ -155,4 +163,57 @@ test("F-G2: with no secret configured, nobody is the edge", async () => {
   const { handler } = harness({ isEdge: (h) => isEdgeCaller(h, "") });
   const res = await call(handler, `${VISIBLE}.png`, { headers: { "x-fourier-edge": "" } });
   assert.equal(res.body.released, false);
+});
+
+// -- a published page's grant (operator ruling 2026-10-02) -------------------
+
+test("PUB: a restricted md5 a live publication shows is released to its reader", async () => {
+  const { handler, presigned, signals } = harness();
+  const res = await call(handler, `${RESTRICTED}.jpg`, { query: { w: "360" }, headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.url, /variants\/c{32}\/360x360/);
+  assert.equal(presigned.length, 1);
+  assert.equal(signals.counts().publication_grants, 1);
+});
+
+test("PUB: without the cookie, or with another page's, the booru's no stands", async () => {
+  const { handler, pubAsks } = harness();
+  assert.equal((await call(handler, `${RESTRICTED}.jpg`, { headers: EDGE })).statusCode, 404);
+  assert.equal(pubAsks.length, 0, "no cookie, no question");
+  assert.equal((await call(handler, `${RESTRICTED}.jpg`, { headers: EDGE, cookies: { [`fourier_pub_${"e".repeat(32)}`]: "1" } })).statusCode, 404);
+});
+
+test("PUB: an md5 that is not on the page, or a jailed one, is refused even with the cookie", async () => {
+  const { handler } = harness();
+  const ck = { cookies: { [`fourier_pub_${PUB}`]: "1" }, headers: EDGE };
+  assert.equal((await call(handler, `${JAILED}.jpg`, ck)).statusCode, 404);
+});
+
+test("PUB: a visible md5 never asks the publication at all", async () => {
+  const { handler, pubAsks } = harness();
+  await call(handler, `${VISIBLE}.png`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+  assert.equal(pubAsks.length, 0);
+});
+
+test("PUB: the route passes at most 8 well-formed grants, in the order they came", async () => {
+  const { handler, pubAsks } = harness();
+  const cookies = { fourier_pub_bogus: "1" };
+  for (let i = 0; i < 11; i++) cookies[`fourier_pub_${i.toString(16).padStart(32, "f")}`] = "1";
+  await call(handler, `${JAILED}.jpg`, { headers: EDGE, cookies });
+  assert.equal(pubAsks[0].hashes.length, 8);
+  assert.ok(pubAsks[0].hashes.every((h) => /^[0-9a-f]{32}$/.test(h)));
+});
+
+test("PUB: sampling unreachable is a 503 for the publication path only, loud and RED", async () => {
+  const { handler, logs, signals, presigned } = harness({
+    publications: { grants: async () => { throw new PublicationsUnavailable(new Error("connect ETIMEDOUT")); } },
+  });
+  const res = await call(handler, `${RESTRICTED}.jpg`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+  assert.equal(res.statusCode, 503);
+  assert.equal(presigned.length, 0);
+  assert.ok(logs.some((l) => /SAMPLING UNREACHABLE/.test(l)));
+  assert.equal(signals.health().checks.find((c) => c.id === "publication-grants").level, "red");
+  // The ordinary booru path does not touch sampling.
+  const ok = await call(handler, `${VISIBLE}.png`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+  assert.equal(ok.statusCode, 200);
 });

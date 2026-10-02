@@ -10,9 +10,12 @@
 //      the Matrix door, which asks the room (canon.js puts DM images in media/
 //      too, under their md5).
 //   2. Does a post exist for this md5 that THIS REQUESTER may see? Asked of the
-//      booru (booru-visibility.js). No -> 404, the same answer as "no such
-//      object", so the gate does not confirm that a hidden image exists.
-//      Original AND variants: a thumbnail of a jailed image is the jailed image.
+//      booru (booru-visibility.js). If not, does a LIVE published page the
+//      reader holds the grant cookie for show it (publication-grants.js;
+//      operator ruling 2026-10-02 -- a publication is his grant)? Neither ->
+//      404, the same answer as "no such object", so the gate does not confirm
+//      that a hidden image exists. Original AND variants: a thumbnail of a
+//      jailed image is the jailed image.
 //   3. For an original: is it still in the bucket? (moved to superseded/ -> 404)
 //   4. Release: the presigned URL to the edge Worker only; everyone else gets
 //      the decision without it (release.js sendRelease, callers.js).
@@ -22,6 +25,7 @@
 // not be asked is the leak this route was rewritten to close.
 
 const { BooruUnavailable } = require("./booru-visibility");
+const { PublicationsUnavailable } = require("./publication-grants");
 
 function makeBooruHandler(d) {
   return async function booruHandler(req, res) {
@@ -54,14 +58,31 @@ function makeBooruHandler(d) {
     try {
       if (await d.isMatrixImage(parsed.md5)) return res.status(404).json({ error: "not found" });
       if (!(await d.visibility.sees(parsed.md5, viewer))) {
-        d.signals.booruHidden(`/booru/${parsed.md5}`);
-        res.set("Cache-Control", "no-store");
-        return res.status(404).json({ error: "not found" });
+        // The booru says no. A published page's grant is the one other yes
+        // (publication-grants.js): only for an md5 a LIVE page shows.
+        const pubs = d.pubHashes(req.cookies);
+        const granted = pubs.length > 0 && (await d.publications.grants(parsed.md5, pubs));
+        if (granted) {
+          d.signals.publicationGranted(`/booru/${parsed.md5}`);
+        } else {
+          d.signals.booruHidden(`/booru/${parsed.md5}`);
+          res.set("Cache-Control", "no-store");
+          return res.status(404).json({ error: "not found" });
+        }
       }
       if (!variant && !(await d.originalExists(d.booruR2Key(parsed.md5, parsed.ext, null)))) {
         return res.status(404).json({ error: "not found" });
       }
     } catch (err) {
+      if (err instanceof PublicationsUnavailable) {
+        // The publication path only: the booru answered, and said no. Refused
+        // until sampling can say which pictures the page shows.
+        d.log.error(`[booru-media] SAMPLING UNREACHABLE for a publication grant -- refusing (fail closed): ${err.message}`);
+        d.signals.publicationsUnavailable(err.message);
+        res.set("Retry-After", "2");
+        res.set("Cache-Control", "no-store");
+        return res.status(503).json({ error: "media authorization temporarily unavailable" });
+      }
       if (err instanceof BooruUnavailable) {
         d.log.error(`[booru-media] BOORU UNREACHABLE -- refusing (fail closed): ${err.message}`);
         d.signals.booruUnavailable(err.message);

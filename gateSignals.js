@@ -43,6 +43,10 @@
 //   booru_unavailable  the booru could not be asked whether a post is
 //                      visible, so booru media was refused (fail closed). RED:
 //                      every booru picture fails while it lasts.
+//   publications_unavailable  sampling could not be asked whether a published
+//                      page shows an md5 its reader holds the grant for. RED:
+//                      published pages' restricted pictures fail meanwhile.
+//   publication_grants an md5 released on a live publication's grant. Counted.
 //   booru_hidden       an md5 asked for that no visible post carries -- a
 //                      jailed, deleted or never-posted image. The gate working;
 //                      counted so a scan of the jail shows up, never flagged.
@@ -57,7 +61,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], publications_unavailable: [], publication_grants: [] };
     this.last = {};
   }
 
@@ -81,6 +85,8 @@ class GateSignals {
   refreshFailed(detail) { this.#note("refresh_failures", detail); }
   booruUnavailable(detail) { this.#note("booru_unavailable", detail); }
   booruHidden(detail) { this.#note("booru_hidden", detail); }
+  publicationsUnavailable(detail) { this.#note("publications_unavailable", detail); }
+  publicationGranted(detail) { this.#note("publication_grants", detail); }
 
   counts(at = this.now()) {
     const out = {};
@@ -149,6 +155,14 @@ class GateSignals {
         label: "booru media refused: no visible post",
         level: "green",
         detail: `${c.booru_hidden} in 10 min -- jailed, deleted or never posted${c.booru_hidden > 0 ? last("booru_hidden") : ""}`,
+      },
+      {
+        id: "publication-grants",
+        label: "published pages' pictures, checked with sampling",
+        level: c.publications_unavailable > 0 ? "red" : "green",
+        detail: c.publications_unavailable > 0
+          ? `${c.publications_unavailable} check(s) failed in 10 min -- a published page's restricted pictures refused while sampling cannot answer${last("publications_unavailable")}`
+          : `${c.publication_grants} granted in 10 min`,
       },
     ];
     const level = checks.some((x) => x.level === "red") ? "red" : checks.some((x) => x.level === "amber") ? "amber" : "ok";

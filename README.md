@@ -159,6 +159,15 @@ says no, as the reader's own `_danbooru2_session`), returns a post carrying
 that md5. Jailed, deleted and never-posted images answer 404. The booru being
 unreachable is a 503, never a yes.
 
+`SAMPLING_INTERNAL_URL` (default `http://172.18.0.1:5181`): Caddy's internal
+door to fourier-sampling, which answers `/p/<hash>/data` and nothing else.
+A published page is the operator's grant of its thread's content for the
+life of the link (ruling 2026-10-02), restricted-tag images included; jailed
+images never. A live page sets `fourier_pub_<hash>` on `/fourier/booru/`, and
+when the booru says no to an md5, the gate asks for each such page's data (at
+most eight, cached 60 s) and allows the md5 only if a live page shows it.
+Sampling unreachable is a 503 for that path only.
+
 `MEDIA_EDGE_SECRET`: the shared secret the Cloudflare Worker sends in
 `X-Fourier-Edge`. Presigned R2 URLs are released only to a request carrying
 it; every other caller of either media route gets the decision as
@@ -217,8 +226,10 @@ times when a module was added.
   (distinct from denied), 404 `M_NOT_FOUND` when R2 lacks the object.
 - `GET /booru/:file` -- booru-native objects (`media/<md5><ext>`,
   `variants/<md5>/<size>` at 180, 360, 720), released only when a post the
-  requester may see carries that md5 (asked of the booru; 404 otherwise, 503
-  when the booru cannot be asked); `?dl=1` signs a
+  requester may see carries that md5 (asked of the booru), or when a live
+  published page whose `fourier_pub_<hash>` cookie the reader holds shows it
+  (asked of sampling); 404 otherwise, 503 when either cannot be asked;
+  `?dl=1` signs a
   `Content-Disposition: attachment` into the presigned URL.
 - `GET /healthz` -- the health document: level, checks, counts. Public
   callers get levels and counts only; a caller on the box or the tailnet that

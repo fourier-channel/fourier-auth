@@ -6,11 +6,11 @@ const { GateSignals, WINDOW_MS } = require("./gateSignals");
 // The lamp: a signed-in reader refused turns the gate's health red; the
 // counts age out after ten minutes; a fresh gate is green.
 
-test("a fresh gate is green with seven clear checks", () => {
+test("a fresh gate is green with eight clear checks", () => {
   const g = new GateSignals(() => 1_000_000);
   const h = g.health();
   assert.equal(h.level, "ok");
-  assert.deepEqual(h.checks.map((c) => c.level), ["green", "green", "green", "green", "green", "green", "green"]);
+  assert.deepEqual(h.checks.map((c) => c.level), ["green", "green", "green", "green", "green", "green", "green", "green"]);
 });
 
 test("a refusal is sorted by why: a dead session is RED, an image in no room AMBER, a non-member GREEN", () => {
@@ -101,8 +101,9 @@ test("F-G5: without detail, no check carries a last-seen mxc id or Matrix user i
   g.refreshFailed("refresh failed for @bob:41chan.net: invalid_grant");
   g.booruUnavailable("connect ECONNREFUSED 172.18.0.5:3000");
   g.booruHidden("/booru/0123456789abcdef0123456789abcdef");
+  g.publicationsUnavailable("sampling at 172.18.0.1:5181 timed out");
   const pub = JSON.stringify(g.health(undefined, { detail: false }));
-  for (const leak of ["SECRETMEDIAID", "@alice", "@bob", "172.18.0.5", "0123456789abcdef", "last:"]) {
+  for (const leak of ["SECRETMEDIAID", "@alice", "@bob", "172.18.0.5", "172.18.0.1", "0123456789abcdef", "last:"]) {
     assert.ok(!pub.includes(leak), `public health leaks ${leak}`);
   }
   // Levels and counts survive: the lamp still works for the public probe.

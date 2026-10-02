@@ -78,6 +78,13 @@ The same audit closed bytes-by-md5 for booru media: the gate now asks the
 booru whether a post the reader may see carries the md5, and serves nothing
 for a jailed, deleted or never-posted image.
 
+One more yes, ruled 2026-10-02: a published page is the operator's grant of
+its thread's content for the life of the link. A live page sets
+`fourier_pub_<hash>` on `/fourier/booru/`, and the gate releases an md5 the
+booru would hide (a restricted-tag image) when that live page shows it,
+checked with sampling and cached at most 60 s. Jailed images are redacted
+from the page and never granted.
+
 Same day, the booru session became zero-click from Technetium: `POST
 /exchange` with a Bearer Matrix token from a listed client origin, proven by
 Synapse's whoami, sets the same `fourier_session` cookie the OIDC callback
