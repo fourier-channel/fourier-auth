@@ -25,6 +25,10 @@ const SECRET = "test-edge-secret";
 // on the live publication PUB.
 const RESTRICTED = "c".repeat(32);
 const PUB = "d".repeat(32);
+// A post the booru shows that was posted FROM Matrix (source mxc://...): its
+// file is a Matrix image's one file and is served only through the Matrix door.
+const MATRIX_POSTED = "e".repeat(32);
+const MXC_ID = "qjbTsnSicsuUyzSjxsOidXSJ";
 
 function harness(over = {}) {
   const presigned = [];
@@ -43,7 +47,12 @@ function harness(over = {}) {
     clientIp: () => null,
     isMatrixImage: async () => false,
     originalExists: async () => true,
-    visibility: { sees: async (md5, viewer) => { asked.push({ md5, viewer }); return md5 === VISIBLE; } },
+    visibility: {
+      sees: async (md5, viewer) => { asked.push({ md5, viewer }); return md5 === VISIBLE || md5 === MATRIX_POSTED; },
+      // VISIBLE is a 4chan-sourced post; MATRIX_POSTED is mxc-sourced.
+      seesNonMatrix: async (md5, viewer) => { asked.push({ md5, viewer, nonMatrix: true }); return md5 === VISIBLE; },
+    },
+    matrixIndexOf: async (md5) => ({ mxc_media_id: MXC_ID, key: `media/${md5}.png` }),
     presign: async (key, disp) => { presigned.push({ key, disp }); return `https://acct.r2.example/bucket/${key}?X-Amz-Credential=AKIA%2Fx&X-Amz-Signature=sig`; },
     isEdge: (headers) => isEdgeCaller(headers, SECRET),
     pubHashes,
@@ -133,11 +142,53 @@ test("F-G1: the booru session is forwarded exactly as the browser sent it, never
   assert.equal(asked[1].viewer.sessionCookie, sent);
 });
 
-test("F-G1: a Matrix image is still refused at this door before the booru is asked", async () => {
-  const { handler, asked } = harness({ isMatrixImage: async () => true });
-  const res = await call(handler, `${VISIBLE}.png`, { headers: EDGE });
+// ONE FILE, TWO DOORS -- and a file can be both. Live 2026-10-05: a 4chan
+// image the booru had posted on 2026-10-04 (post 745131) was posted again in
+// Matrix; canon adopted the booru's file as the Matrix image's one file and
+// wrote index/md5/<md5>.json, and this door then refused the booru post's
+// original and every thumbnail with a silent 404. Thirteen live non-Matrix
+// posts were refused the same way, post 1 since the 2026-09-30 backfill.
+// "Some Matrix id uses this file" is not "this file is only Matrix's".
+
+test("F-G1 (a): a file a Matrix id shares with a visible non-Matrix post is released as that post -- original and variants", async () => {
+  const { handler, presigned, signals } = harness({ isMatrixImage: async () => true });
+  const orig = await call(handler, `${VISIBLE}.png`, { headers: EDGE });
+  assert.equal(orig.statusCode, 200);
+  assert.match(orig.body.url, /media\/a{32}\.png/);
+  const thumb = await call(handler, `${VISIBLE}.jpg`, { query: { w: "180", h: "180" }, headers: EDGE });
+  assert.equal(thumb.statusCode, 200);
+  assert.match(thumb.body.url, /variants\/a{32}\/180x180\.jpg/);
+  assert.equal(presigned.length, 2);
+  assert.equal(signals.counts().matrix_refused, 0, "a release is not a refusal");
+});
+
+test("F-G1 (b): a Matrix image whose only post came from Matrix is refused at this door -- original and variants", async () => {
+  const { handler, presigned } = harness({ isMatrixImage: async () => true });
+  for (const query of [{}, { w: "180", h: "180" }]) {
+    const res = await call(handler, `${MATRIX_POSTED}.png`, { query, headers: EDGE });
+    assert.equal(res.statusCode, 404, JSON.stringify(query));
+    assert.ok(!leaksCredential(res));
+  }
+  assert.equal(presigned.length, 0, "nothing was even signed");
+});
+
+test("F-G1 (c): a Matrix image with no post is refused, logged with its remedy, and signalled with its mxc id", async () => {
+  const { handler, presigned, signals, logs } = harness({ isMatrixImage: async () => true });
+  const res = await call(handler, `${JAILED}.png`, { headers: EDGE });
   assert.equal(res.statusCode, 404);
-  assert.equal(asked.length, 0);
+  assert.equal(presigned.length, 0);
+  assert.equal(signals.counts().matrix_refused, 1);
+  assert.match(signals.last.matrix_refused, new RegExp(MXC_ID));
+  assert.equal(signals.health().checks.find((x) => x.id === "booru-matrix-refused").level, "amber");
+  const line = logs.find((l) => l.includes(JAILED));
+  assert.ok(line, "the refusal is logged");
+  assert.match(line, new RegExp(MXC_ID));
+  assert.match(line, /Fix: /);
+  // The mxc id being unreadable changes the words, never the answer.
+  const broken = harness({ isMatrixImage: async () => true, matrixIndexOf: async () => { throw new Error("NoSuchKey"); } });
+  const again = await call(broken.handler, `${JAILED}.png`, { headers: EDGE });
+  assert.equal(again.statusCode, 404);
+  assert.match(broken.signals.last.matrix_refused, /mxc id unreadable: NoSuchKey/);
 });
 
 test("an original no longer in the bucket is refused even when its post is visible", async () => {

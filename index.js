@@ -396,6 +396,12 @@ async function isMatrixImage(md5) {
   await cacheSetJson(ck, { v }, v ? 24 * 60 * 60 : 60).catch(() => {});
   return v;
 }
+// What index/md5/<md5>.json says (canon.js: { mxc_media_id, key }), for the
+// booru door's refusal to name the Matrix id. Read only on that refusal.
+async function matrixIndexOf(md5) {
+  const out = await s3.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: `index/md5/${md5}.json` }));
+  return JSON.parse(Buffer.from(await out.Body.transformToByteArray()).toString("utf8"));
+}
 // Does an original exist at its key? A yes is cached for an hour; a no only
 // briefly, since an upload may be arriving.
 async function originalExists(key) {
@@ -430,6 +436,7 @@ app.get("/booru/:file", makeBooruHandler({
   booruCookieName: "_danbooru2_session",
   clientIp: (headers) => edgeClientIp(headers, MEDIA_EDGE_SECRET),
   isMatrixImage,
+  matrixIndexOf,
   originalExists,
   visibility: booruVisibility,
   pubHashes,

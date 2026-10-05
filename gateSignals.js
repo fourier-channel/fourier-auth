@@ -50,6 +50,12 @@
 //   booru_hidden       an md5 asked for that no visible post carries -- a
 //                      jailed, deleted or never-posted image. The gate working;
 //                      counted so a scan of the jail shows up, never flagged.
+//   matrix_refused     an md5 asked for at the booru door whose file is a
+//                      Matrix image's and that no visible non-Matrix post
+//                      holds. AMBER: the booru links Matrix posts through the
+//                      Matrix door, so a refusal here is a guess or a mislink
+//                      -- and until 2026-10-05 it was also thirteen 4chan posts
+//                      404ing with no trace anywhere. Worth a look if it repeats.
 //
 // WHO SEES THE DETAIL (F-G5). The "last:" strings name mxc ids and Matrix user
 // ids. health({ detail: false }) leaves them out -- levels, labels and counts
@@ -61,7 +67,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], publications_unavailable: [], publication_grants: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [] };
     this.last = {};
   }
 
@@ -85,6 +91,7 @@ class GateSignals {
   refreshFailed(detail) { this.#note("refresh_failures", detail); }
   booruUnavailable(detail) { this.#note("booru_unavailable", detail); }
   booruHidden(detail) { this.#note("booru_hidden", detail); }
+  matrixRefused(detail) { this.#note("matrix_refused", detail); }
   publicationsUnavailable(detail) { this.#note("publications_unavailable", detail); }
   publicationGranted(detail) { this.#note("publication_grants", detail); }
 
@@ -155,6 +162,14 @@ class GateSignals {
         label: "booru media refused: no visible post",
         level: "green",
         detail: `${c.booru_hidden} in 10 min -- jailed, deleted or never posted${c.booru_hidden > 0 ? last("booru_hidden") : ""}`,
+      },
+      {
+        id: "booru-matrix-refused",
+        label: "booru media refused: a Matrix image with no non-Matrix post",
+        level: c.matrix_refused > 0 ? "amber" : "green",
+        detail: c.matrix_refused > 0
+          ? `${c.matrix_refused} in 10 min -- served only through the Matrix door; a booru post linking it here is a mislink${last("matrix_refused")}`
+          : "none in 10 min",
       },
       {
         id: "publication-grants",

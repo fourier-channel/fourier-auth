@@ -6,9 +6,17 @@
 //
 // ONE FILE, TWO DOORS, and this is the booru's. The order of the questions:
 //
-//   1. Is it a Matrix image's one file? Refused: those are served only through
-//      the Matrix door, which asks the room (canon.js puts DM images in media/
-//      too, under their md5).
+//   1. Is it a Matrix image's one file? Then it is refused UNLESS a post this
+//      requester may see holds it in its own right -- visible, undeleted, and
+//      not posted from Matrix (booru-visibility.js seesNonMatrix). A Matrix
+//      image is served only through the Matrix door, which asks the room
+//      (canon.js puts DM images in media/ too, under their md5). But one file
+//      can be both: a 4chan image the booru already held, posted again in
+//      Matrix, is adopted by canon as that Matrix image's one file. Refusing
+//      on the Matrix record alone 404'd the booru post's original and every
+//      thumbnail, silently -- thirteen live posts on 2026-10-05, post 1 since
+//      2026-09-30. A refusal here is logged with its remedy and signalled.
+//      A file released this way is that post's, so step 2 is already answered.
 //   2. Does a post exist for this md5 that THIS REQUESTER may see? Asked of the
 //      booru (booru-visibility.js). If not, does a LIVE published page the
 //      reader holds the grant cookie for show it (publication-grants.js;
@@ -56,8 +64,23 @@ function makeBooruHandler(d) {
     const viewer = booruSession ? { sessionCookie: booruSession, clientIp: d.clientIp(req.headers) } : null;
 
     try {
-      if (await d.isMatrixImage(parsed.md5)) return res.status(404).json({ error: "not found" });
-      if (!(await d.visibility.sees(parsed.md5, viewer))) {
+      let ownPost = false;
+      if (await d.isMatrixImage(parsed.md5)) {
+        ownPost = await d.visibility.seesNonMatrix(parsed.md5, viewer);
+        if (!ownPost) {
+          const mxc = await matrixIdOf(d, parsed.md5);
+          d.log.warn(
+            `[booru-media] REFUSED /booru/${parsed.md5}${variant ? ` (${variant})` : ""}: its file is Matrix media ${mxc} ` +
+              "and no post this reader may see holds it outside Matrix, so it is served only through the Matrix door (room check). " +
+              `Fix: if a booru post that did not come from Matrix should show it, ask posts.json?tags=md5:${parsed.md5}&only=id,source,is_deleted ` +
+              `for that post's source and visibility; index/md5/${parsed.md5}.json names the Matrix id.`,
+          );
+          d.signals.matrixRefused(`/booru/${parsed.md5} is Matrix media ${mxc}`);
+          res.set("Cache-Control", "no-store");
+          return res.status(404).json({ error: "not found" });
+        }
+      }
+      if (!ownPost && !(await d.visibility.sees(parsed.md5, viewer))) {
         // The booru says no. A published page's grant is the one other yes
         // (publication-grants.js): only for an md5 a LIVE page shows.
         const pubs = d.pubHashes(req.cookies);
@@ -105,6 +128,18 @@ function makeBooruHandler(d) {
   };
 }
 
+
+// The Matrix id index/md5/<md5>.json names, for a refusal's log line and
+// signal. Never fails the request: the answer is already a 404.
+async function matrixIdOf(d, md5) {
+  if (typeof d.matrixIndexOf !== "function") return "(mxc id not looked up)";
+  try {
+    const idx = await d.matrixIndexOf(md5);
+    return idx && typeof idx.mxc_media_id === "string" ? `mxc ${idx.mxc_media_id}` : "(index/md5 names no mxc id)";
+  } catch (err) {
+    return `(mxc id unreadable: ${err.message})`;
+  }
+}
 
 // THE BOORU SESSION EXACTLY AS THE BROWSER SENT IT. cookie-parser hands the
 // route a URL-DECODED value, and Rails' encrypted session is base64 that the

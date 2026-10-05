@@ -35,13 +35,13 @@ function fakeAxios(answer) {
   };
 }
 
-test("asks posts.json for the md5s, as an anonymous reader, for md5 and is_deleted only", async () => {
+test("asks posts.json for the md5s, as an anonymous reader, for md5, is_deleted and source only", async () => {
   const ax = fakeAxios({ status: 200, data: [] });
   await booruPostsClient({ axios: ax, baseUrl: "http://danbooru:3000/" })([md5(1), md5(2)]);
   const { url, cfg } = ax.seen[0];
   assert.equal(url, "http://danbooru:3000/posts.json");
   assert.equal(cfg.params.tags, `md5:${md5(1)},${md5(2)}`);
-  assert.equal(cfg.params.only, "md5,is_deleted");
+  assert.equal(cfg.params.only, "md5,is_deleted,source");
   assert.equal(cfg.params.limit, 2);
   assert.equal(cfg.headers.Cookie, undefined, "anonymous carries no cookie");
   assert.equal(cfg.maxRedirects, 0);
@@ -59,11 +59,51 @@ test("a row counts only when it hands the md5 back and is not deleted", async ()
   ] });
   const client = booruPostsClient({ axios: ax, baseUrl: "http://b" });
   const seen = await client([md5(1), md5(2), md5(3), md5(4)]);
-  assert.deepEqual([...seen].sort(), [md5(1), md5(4)]);
+  assert.deepEqual([...seen.keys()].sort(), [md5(1), md5(4)]);
   // Asked AS a reader, a deleted post the booru hands the md5 of is theirs to
   // see: an admin reviewing it, or its uploader appealing.
   const asAdmin = await client([md5(1), md5(2), md5(3), md5(4)], { sessionCookie: "admin" });
-  assert.deepEqual([...asAdmin].sort(), [md5(1), md5(3), md5(4)]);
+  assert.deepEqual([...asAdmin.keys()].sort(), [md5(1), md5(3), md5(4)]);
+});
+
+test("a visible row is non-Matrix only when undeleted and its source is a string that is not mxc://", async () => {
+  // Live 2026-10-05: 4chan posts whose files a Matrix repost had adopted were
+  // refused at the booru door. Their source is what says the post is theirs.
+  const ax = fakeAxios({ status: 200, data: [
+    { md5: md5(1), is_deleted: false, source: "https://boards.4chan.org/b/thread/954648261#p954648633" },
+    { md5: md5(2), is_deleted: false, source: "mxc://41chan.net/qjbTsnSicsuUyzSjxsOidXSJ" },
+    { md5: md5(3), is_deleted: false, source: "MXC://41chan.net/upper" },
+    { md5: md5(4), is_deleted: false, source: "" },          // no source: still not from Matrix
+    { md5: md5(5), is_deleted: false },                       // source withheld: not counted
+    { md5: md5(6), is_deleted: true, source: "https://boards.4chan.org/b/x" },
+  ] });
+  const client = booruPostsClient({ axios: ax, baseUrl: "http://b" });
+  const asAdmin = await client([1, 2, 3, 4, 5, 6].map(md5), { sessionCookie: "admin" });
+  const nm = (i) => asAdmin.get(md5(i)).nonMatrix;
+  assert.deepEqual([1, 2, 3, 4, 5, 6].map(nm), [true, false, false, true, false, false]);
+  assert.equal(asAdmin.size, 6, "every one of them is still VISIBLE to the admin");
+});
+
+test("seesNonMatrix: a 4chan post's file is the post's, an mxc post's is not, and a stale {v}-only cache entry is re-asked", async () => {
+  const rows = { [md5(1)]: { nonMatrix: true }, [md5(2)]: { nonMatrix: false } };
+  const { deps, cache, calls } = fakes({
+    fetchVisible: async (m, viewer) => { calls.push({ m, viewer }); return new Map(m.filter((x) => rows[x]).map((x) => [x, rows[x]])); },
+  });
+  cache.set(`boorusees:${md5(1)}`, { v: true });      // written before nm existed
+  const v = createBooruVisibility(deps, { windowMs: 0 });
+  assert.equal(await v.seesNonMatrix(md5(1)), true);
+  assert.equal(calls.length, 1, "the {v}-only entry was not read as an answer");
+  assert.equal(await v.seesNonMatrix(md5(2)), false);
+  assert.equal(await v.sees(md5(2)), true, "an mxc post is still visible -- only not this door's to serve");
+  assert.equal(await v.seesNonMatrix(md5(3)), false, "no post at all");
+  // A post only the reader may see (restricted): asked as that reader.
+  const reader = { sessionCookie: "gold", clientIp: "203.0.113.9" };
+  const hidden = fakes({
+    fetchVisible: async (m, viewer) => new Map(viewer ? m.map((x) => [x, { nonMatrix: true }]) : []),
+  });
+  const hv = createBooruVisibility(hidden.deps, { windowMs: 0 });
+  assert.equal(await hv.seesNonMatrix(md5(7)), false, "anonymous: not visible");
+  assert.equal(await hv.seesNonMatrix(md5(7), reader), true, "the Gold reader's own answer");
 });
 
 test("asking AS a reader forwards only their booru session, and their address", async () => {

@@ -157,7 +157,11 @@ on the docker network. `/booru/<md5>` serves an original or a variant only
 when the booru's own posts API, asked as an anonymous reader (and, when that
 says no, as the reader's own `_danbooru2_session`), returns a post carrying
 that md5. Jailed, deleted and never-posted images answer 404. The booru being
-unreachable is a 503, never a yes.
+unreachable is a 503, never a yes. A file that is also a Matrix image's one
+file (fourier-tunnel canon's `index/md5/`) is served here only when a visible,
+undeleted post that did not come from Matrix (its source is not `mxc://`)
+holds it; otherwise it is room-gated behind the Matrix door, and the refusal
+is logged with its fix and counted on the `booru-matrix-refused` check.
 
 `SAMPLING_INTERNAL_URL` (default `http://172.18.0.1:5181`): Caddy's internal
 door to fourier-sampling, which answers `/p/<hash>/data` and nothing else.

@@ -17,13 +17,26 @@
 // results entirely). So the question is the booru's own search API, asked the
 // way a reader would ask it:
 //
-//   GET <booru>/posts.json?tags=md5:<a>,<b>,...&only=md5,is_deleted&limit=N
+//   GET <booru>/posts.json?tags=md5:<a>,<b>,...&only=md5,is_deleted,source&limit=N
 //
 // A row counts only when it carries the md5 back (the booru strips md5 from a
 // post the viewer may not see the media of) -- and, for an anonymous ask, is
 // not deleted. An md5 absent from the answer is refused -- whether it was
 // never posted, is jailed, or is deleted, the gate cannot tell and must not
 // need to.
+//
+// WHOSE FILE IS IT (2026-10-05). The same answer says where each visible post
+// came from. A file can be a Matrix image's one file AND a booru post's: a
+// 4chan image the booru already held, posted again in Matrix, is one file that
+// canon adopts (fourier-tunnel canon.js) and records in index/md5/. The booru
+// door refuses Matrix images -- they are room-gated, served only through the
+// Matrix door -- but a post that came from anywhere else holds those bytes in
+// its own right, and its readers may have them. seesNonMatrix(md5) is that
+// question: a visible, undeleted post whose source is a string that does not
+// start with mxc://. A row without a source string is not counted (fail
+// closed). Without it the door refused thirteen live 4chan posts' originals
+// and thumbnails with a silent 404 (post 1 since 2026-09-30, five more on
+// 2026-10-05 when their images were reposted in Matrix).
 //
 // WHO ASKS. Anonymous first, always: that answer is shared by every viewer and
 // cached. Only when it is no AND the request carries the reader's own booru
@@ -79,9 +92,10 @@ class BooruUnavailable extends Error {
 }
 
 /**
- * The booru's posts API as a function: md5s in, the Set of those the viewer
- * may see out. THROWS for "could not find out"; returns a (possibly empty)
- * Set for an answer.
+ * The booru's posts API as a function: md5s in, a Map out whose keys are
+ * the md5s the viewer may see, each with { nonMatrix } -- true when that
+ * visible post is undeleted and its source is not an mxc:// URI. THROWS for
+ * "could not find out"; returns a (possibly empty) Map for an answer.
  *
  *   viewer: null for anonymous, or { sessionCookie, clientIp } to ask as that
  *   reader. Only the booru session cookie is forwarded -- never the rest of the
@@ -91,7 +105,7 @@ class BooruUnavailable extends Error {
 function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", timeoutMs = 4000 }) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   return async function fetchVisible(md5s, viewer = null) {
-    if (!Array.isArray(md5s) || md5s.length === 0) return new Set();
+    if (!Array.isArray(md5s) || md5s.length === 0) return new Map();
     if (md5s.length > MAX_BATCH) throw new Error(`batch of ${md5s.length} exceeds the booru's ${MAX_BATCH}-row ceiling`);
     const headers = { Accept: "application/json" };
     if (viewer && viewer.sessionCookie) {
@@ -99,7 +113,7 @@ function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", t
       if (viewer.clientIp) headers["X-Forwarded-For"] = viewer.clientIp;
     }
     const r = await axios.get(`${base}/posts.json`, {
-      params: { tags: `md5:${md5s.join(",")}`, only: "md5,is_deleted", limit: md5s.length },
+      params: { tags: `md5:${md5s.join(",")}`, only: "md5,is_deleted,source", limit: md5s.length },
       headers,
       timeout: timeoutMs,
       // Never follow a redirect: a 302 to a login page is not an answer.
@@ -115,11 +129,12 @@ function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", t
     // reader's own ask it is NOT: an admin reviewing a deleted post, or its
     // uploader appealing, is handed the md5 precisely because they may see it.
     const want = new Set(md5s);
-    const seen = new Set();
+    const seen = new Map();
     for (const row of r.data) {
       if (!row || typeof row.md5 !== "string" || !want.has(row.md5)) continue;
       if (!viewer && row.is_deleted === true) continue;
-      seen.add(row.md5);
+      const nonMatrix = row.is_deleted !== true && typeof row.source === "string" && !/^mxc:\/\//i.test(row.source);
+      seen.set(row.md5, { nonMatrix });
     }
     return seen;
   };
@@ -127,7 +142,8 @@ function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", t
 
 /**
  * deps:
- *   fetchVisible(md5s, viewer) -> Set<md5>   (throws = could not find out)
+ *   fetchVisible(md5s, viewer) -> Map<md5, {nonMatrix}> (a Set is read as
+ *                                 "visible, source unknown")  (throws = could not find out)
  *   cacheGet(key) -> value|null, cacheSet(key, value, ttlSeconds)
  *   hashKey(string) -> string                (session cookies never become keys)
  * opts: { ttl, windowMs, maxBatch, setTimer }
@@ -162,12 +178,14 @@ function createBooruVisibility(deps, opts = {}) {
       }
       for (const [md5, d] of batch) {
         const v = seen.has(md5);
+        const facts = v && typeof seen.get === "function" ? seen.get(md5) : null;
+        const nm = !!(facts && facts.nonMatrix === true);
         const life = g.viewer ? (v ? ttl.viewerVisible : ttl.viewerHidden) : (v ? ttl.visible : ttl.hidden);
         // Not awaited: the reader is not kept waiting on Redis. A miss in the
         // gap only costs one more ask, never a wrong answer.
-        Promise.resolve().then(() => deps.cacheSet(cacheKey(groupKey, md5), { v }, life)).catch(() => {});
+        Promise.resolve().then(() => deps.cacheSet(cacheKey(groupKey, md5), { v, nm }, life)).catch(() => {});
         inflight.delete(groupKey + md5);
-        d.resolve(v);
+        d.resolve({ v, nm });
       }
     })();
   }
@@ -189,9 +207,12 @@ function createBooruVisibility(deps, opts = {}) {
     return p;
   }
 
+  // -> { v: visible, nm: visible, undeleted and not Matrix-sourced }. A cached
+  // answer from before nm existed ({v} alone) is a miss, so it is asked again
+  // rather than read as "Matrix-sourced".
   async function ask(groupKey, viewer, md5) {
     const hit = await deps.cacheGet(cacheKey(groupKey, md5)).catch(() => null);
-    if (hit && typeof hit.v === "boolean") return hit.v;
+    if (hit && typeof hit.v === "boolean" && typeof hit.nm === "boolean") return { v: hit.v, nm: hit.nm };
     return enqueue(groupKey, viewer, md5);
   }
 
@@ -201,12 +222,27 @@ function createBooruVisibility(deps, opts = {}) {
    * viewer is asked only when anonymous is refused. Throws BooruUnavailable.
    */
   async function sees(md5, viewer = null) {
-    if (await ask("anon", null, md5)) return true;
+    if ((await ask("anon", null, md5)).v) return true;
     if (!viewer || !viewer.sessionCookie) return false;
-    return ask("v" + deps.hashKey(viewer.sessionCookie), viewer, md5);
+    return (await ask("v" + deps.hashKey(viewer.sessionCookie), viewer, md5)).v;
   }
 
-  return { sees, pendingCount: () => inflight.size };
+  /**
+   * true when a post for md5 exists that this viewer may see, is not deleted,
+   * and did not come from Matrix (its source is not mxc://). The booru door's
+   * question for a file that is also a Matrix image's one file. Same order as
+   * sees(): anonymous first, the reader only when anonymous does not see it --
+   * md5 is unique per post, so a post anonymous sees is the one the reader
+   * would see. Throws BooruUnavailable.
+   */
+  async function seesNonMatrix(md5, viewer = null) {
+    const anon = await ask("anon", null, md5);
+    if (anon.v) return anon.nm;
+    if (!viewer || !viewer.sessionCookie) return false;
+    return (await ask("v" + deps.hashKey(viewer.sessionCookie), viewer, md5)).nm;
+  }
+
+  return { sees, seesNonMatrix, pendingCount: () => inflight.size };
 }
 
 module.exports = { createBooruVisibility, booruPostsClient, BooruUnavailable, MAX_BATCH, TTL };
