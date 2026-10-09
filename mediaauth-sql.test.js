@@ -17,7 +17,7 @@ const assert = require("node:assert/strict");
 const { makeQueries } = require("./mediaauth-sql");
 
 const URL_ = process.env.MEDIAAUTH_TEST_PG;
-const skip = URL_ ? false : "MEDIAAUTH_TEST_PG is not set -- the SQL of the uploader rule is NOT exercised in this run";
+const skip = URL_ ? false : "MEDIAAUTH_TEST_PG is not set -- the SQL of the uploader rule and the sampling gate is NOT exercised in this run";
 
 const HS = "41chan.net";
 const V = "@victim:41chan.net", A = "@attacker:41chan.net", F = "@friend:41chan.net", L = "@legacy:41chan.net";
@@ -38,7 +38,7 @@ test.before(async () => {
     create table profiles (user_id text, displayname text, avatar_url text, full_user_id text);
     create table local_media_repository (media_id text unique, user_id text);
     create table room_memberships (event_id text, user_id text, sender text, room_id text, membership text);
-    create table current_state_events (event_id text, room_id text, type text, state_key text);
+    create table current_state_events (event_id text, room_id text, type text, state_key text, membership text);
   `);
   let n = 0;
   const ev = async (room, type, sender, content) => {
@@ -80,6 +80,23 @@ test.before(async () => {
   // Encrypted rooms: the victim was in !enc2, never in !enc.
   await join(V, "!enc2"); await join(A, "!enc2"); await join(A, "!enc");
   await client.query("insert into current_state_events values ('$s1','!enc','m.room.encryption','')");
+
+  // The sampling gate's room (ruling 2026-10-09): current state names the
+  // live power levels; an OLDER power-levels event (in events, not current)
+  // must never be the one read. @left left with a level still recorded.
+  const state = async (room, type, key, content, membership = null) => {
+    const id = `$cs${++n}`;
+    await client.query("insert into event_json values ($1,$2,$3)", [id, room, JSON.stringify({ type, state_key: key, content })]);
+    await client.query("insert into current_state_events values ($1,$2,$3,$4,$5)", [id, room, type, key, membership]);
+  };
+  await client.query("insert into event_json values ('$oldpl','!mods',$1)",
+    [JSON.stringify({ type: "m.room.power_levels", content: { users: { [A]: 100 } } })]);
+  await state("!mods", "m.room.power_levels", "", { users: { [V]: 100, [F]: 70, "@left:41chan.net": 90 }, users_default: 0 });
+  await state("!mods", "m.room.name", "", { name: "modsmodsmods" });
+  await state("!mods", "m.room.member", V, { membership: "join" }, "join");
+  await state("!mods", "m.room.member", F, { membership: "join" }, "join");
+  await state("!mods", "m.room.member", "@left:41chan.net", { membership: "leave" }, "leave");
+  await state("!mods", "m.room.member", A, { membership: "invite" }, "invite");
 
   q = makeQueries(client, { homeserverName: HS });
 });
@@ -139,4 +156,15 @@ test("the queries run as written against the indexes the gate declares", { skip 
   assert.ok(sql.length >= 4, "the index file parsed");
   for (const stmt of sql) await client.query(stmt);
   assert.equal(await q.queryIsSiteAsset(mxc("av1"), V, HS), true);
+});
+
+test("sampling gate: the room's CURRENT power levels, its name, and only the joined", { skip }, async () => {
+  const r = await q.queryRoomGateState("!mods");
+  assert.deepEqual(r.powerLevels, { users: { [V]: 100, [F]: 70, "@left:41chan.net": 90 }, users_default: 0 });
+  assert.equal(r.name, "modsmodsmods");
+  assert.deepEqual(r.joined, [F, V], "the leaver and the invitee are not joined");
+});
+
+test("sampling gate: a room this server does not hold reads as no power levels", { skip }, async () => {
+  assert.deepEqual(await q.queryRoomGateState("!nowhere:41chan.net"), { powerLevels: null, name: null, joined: [] });
 });

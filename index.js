@@ -19,14 +19,21 @@ const tokenSource = makeTokenSource({
     error: (m) => { console.error(m); signals.refreshFailed(m.replace(/^\[session\] /, "")); },
   },
 });
-const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, verifySynapseGrants, whoamiUser } = require("./mediaauth");
+const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, verifySynapseGrants, whoamiUser, queryRoomGateState } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // Wiring, asserted at boot: the first deploy of /exchange answered every
 // request 503 "whoamiUser is not a function" because the helper had been
 // added to an internal deps object in mediaauth.js instead of its exports.
 // A missing export is a boot failure here, not a 503 for verification to find.
 if (typeof whoamiUser !== "function") throw new Error("mediaauth must export whoamiUser");
+if (typeof queryRoomGateState !== "function") throw new Error("mediaauth must export queryRoomGateState");
 const { makeVerifyHandler } = require("./verify");
+const { createSampleGate, parseSampleGateConfig } = require("./sample-gate");
+// The sampling console's door (operator ruling 2026-10-09; sample-gate.js).
+// Config is checked here, said at boot and on /healthz, and a broken one
+// closes the console -- never the service, which also gates every picture.
+const sampleGateConfig = parseSampleGateConfig(process.env);
+const sampleGate = createSampleGate({ config: sampleGateConfig, readRoom: queryRoomGateState });
 const { originalRelease, sendRelease } = require("./release");
 const { isEdgeCaller, edgeClientIp, healthDetailAllowed } = require("./callers");
 const { createBooruVisibility, booruPostsClient } = require("./booru-visibility");
@@ -194,6 +201,14 @@ app.get("/healthz", async (req, res) => {
       detail: MEDIA_EDGE_SECRET ? "set" : "MEDIA_EDGE_SECRET unset: no URL is released, every picture fails",
     },
     {
+      id: "sample-gate",
+      label: "sampling console gate configured",
+      level: sampleGateConfig.ok ? "green" : "red",
+      // The room id is for the box and the tailnet only, like every "last:" detail.
+      detail: !sampleGateConfig.ok ? sampleGateConfig.problem
+        : detail ? `${sampleGateConfig.room} at level ${sampleGateConfig.level}` : "configured",
+    },
+    {
       id: "synapse-schema",
       label: "Synapse indexes and grants the gate needs",
       // Unchecked (just booted, or the database did not answer the check) is
@@ -314,6 +329,8 @@ app.options("/media/:serverName/:mediaId", (req, res) => {
 app.get("/verify", makeVerifyHandler({
   getSession,
   cookieName: COOKIE_NAME,
+  // GET /verify?gate=sample: the sampling console's door (sample-gate.js).
+  gates: { sample: sampleGate.answer },
   // The session bar's evidence: real expiry from Redis PTTL (there is no
   // refresh -- sessions live a fixed TTL, so no refresh_at is published and
   // none is invented) plus the user's previous session, recorded at logout.
@@ -637,6 +654,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`fourier-auth listening on port ${PORT}`);
+  if (sampleGateConfig.ok) {
+    console.log(`[sample-gate] /verify?gate=sample opens at power level ${sampleGateConfig.level} in ${sampleGateConfig.room}`);
+  } else {
+    console.error(`[sample-gate] NOT CONFIGURED -- the sampling console answers 503 to everyone. ${sampleGateConfig.problem}`);
+  }
   // Say at boot whether the media gate's indexes exist, rather than letting a
   // fresh database announce it as 5-second thumbnails and 403s.
   Promise.all([verifySynapseIndexes(), verifySynapseGrants()]).then(([r, g]) => {

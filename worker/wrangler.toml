@@ -16,6 +16,18 @@ zone_name = "41chan.net"
 pattern = "booru.41chan.net/fourier/booru/*"
 zone_name = "41chan.net"
 
+# The same booru-native pictures on the sampling surface's own host (operator
+# ruling 2026-10-09: sampling moves from booru.41chan.net/sample to
+# sample.41chan.net). Its external view and its published pages
+# (sample.41chan.net/p/<hash>) name pictures root-absolute as
+# /fourier/booru/<md5>..., and a page's grant cookie fourier_pub_<hash> is
+# host-only on Path=/fourier/booru/ -- so only a route on THIS host receives
+# it. Without the route those paths fall through to sampling, which serves
+# no bytes.
+[[routes]]
+pattern = "sample.41chan.net/fourier/booru/*"
+zone_name = "41chan.net"
+
 [vars]
 # Where the authorization decision comes from. Not a secret: it answers only
 # to a valid Matrix token, and holds no credential of its own.

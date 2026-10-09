@@ -43,6 +43,12 @@ services:
       # Caddy :5181 block and ops/hetzner/firewall/auth-to-sampling.sh.
       - SAMPLING_INTERNAL_URL=http://172.18.0.1:5181
       - HOMESERVER_NAME=41chan.net
+      # The sampling console on sample.41chan.net opens to a Matrix user at or
+      # above this power level in this room, joined (operator ruling
+      # 2026-10-09: the modsmodsmods room, 70 = content moderators). Unset or
+      # malformed closes the console (503), never the service. sample-gate.js.
+      - SAMPLE_GATE_ROOM=!GgCWjVAknxPyofQtCQ:41chan.net
+      - SAMPLE_GATE_LEVEL=70
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
       - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
     networks:

@@ -55,7 +55,7 @@ pool.on("error", (err) => {
 });
 
 // The queries live in mediaauth-sql.js, as functions of this pool.
-const { queryUploader, queryIsSiteAsset, queryMediaRooms, queryUploaderJoined, queryIsEncrypted } =
+const { queryUploader, queryIsSiteAsset, queryMediaRooms, queryUploaderJoined, queryIsEncrypted, queryRoomGateState } =
   makeQueries(pool, { homeserverName: HOMESERVER_NAME });
 
 // Is this token valid on THIS server? The only question a site asset asks.
@@ -157,5 +157,8 @@ module.exports = {
   isEncryptedRoom: core.isEncryptedRoom,
   tokenIsOurs: whoamiOk,
   whoamiUser,
+  // The sampling gate's read of a room's current power levels (sample-gate.js),
+  // on this same pool: one Synapse role, one place its queries live.
+  queryRoomGateState,
   MediaAuthUnavailable,
 };

@@ -332,7 +332,8 @@ test("PUB: at most 8 grants, and the page the picture was requested from is neve
   assert.equal(MAX_PUB_COOKIES, 8);
   const plain = booruCookie(raw, null).split("; ");
   assert.equal(plain.length, 8);
-  const fromPage = booruCookie(raw, `https://booru.41chan.net/sample/p/${hs[11]}`).split("; ");
+  // A published page lives at sample.41chan.net/p/<hash> (ruling 2026-10-09).
+  const fromPage = booruCookie(raw, `https://sample.41chan.net/p/${hs[11]}`).split("; ");
   assert.equal(fromPage.length, 8);
   assert.equal(fromPage[0], `fourier_pub_${hs[11]}=1`, "the Referer's publication goes first");
 });
@@ -374,6 +375,47 @@ test("PUB end to end: grants reach the gate, and two readers' different grants a
     assert.equal(gateCalls[1], null);
     await ask(`fourier_pub_${PH("b")}=1`);
     assert.equal(gateCalls.length, 3, "another page's grant is another key");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete globalThis.caches;
+  }
+});
+
+// -- sample.41chan.net (operator ruling 2026-10-09) ---------------------------
+
+test("SAMPLE: wrangler.toml binds the booru-native path on BOTH hosts, in the 41chan.net zone", async () => {
+  const { readFileSync } = await import("node:fs");
+  const toml = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
+  const routes = [...toml.matchAll(/\[\[routes\]\]\s*\npattern = "([^"]+)"\s*\nzone_name = "([^"]+)"/g)].map((m) => [m[1], m[2]]);
+  for (const want of ["booru.41chan.net/fourier/booru/*", "sample.41chan.net/fourier/booru/*", "matrix.41chan.net/_matrix/client/v1/media/*"]) {
+    assert.deepEqual(routes.find(([p]) => p === want), [want, "41chan.net"], want);
+  }
+});
+
+test("SAMPLE: a published page's picture on sample.41chan.net carries its grant to the gate and is served", async () => {
+  const gateCalls = [];
+  globalThis.caches = { default: { match: async () => undefined, put: async () => {} } };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.startsWith("https://mxc.example/")) {
+      gateCalls.push({ url, cookie: init.headers.Cookie || null });
+      return new Response(JSON.stringify({ url: "https://r2.example/media/" + "d".repeat(32) + ".png?X-Amz-Signature=s" }), { status: 200 });
+    }
+    return new Response("PNG", { status: 200, headers: { "Content-Type": "image/png" } });
+  };
+  try {
+    const hash = PH("e");
+    const req = new Request("https://sample.41chan.net/fourier/booru/" + "d".repeat(32) + ".png", {
+      headers: { Cookie: `theme=dark; fourier_pub_${hash}=1`, Referer: `https://sample.41chan.net/p/${hash}` },
+    });
+    const waits = [];
+    const res = await worker.fetch(req, { FOURIER_AUTH_BASE: "https://mxc.example", MEDIA_EDGE_SECRET: "k" }, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), "PNG");
+    assert.equal(gateCalls.length, 1);
+    assert.equal(gateCalls[0].cookie, `fourier_pub_${hash}=1`);
   } finally {
     globalThis.fetch = realFetch;
     delete globalThis.caches;

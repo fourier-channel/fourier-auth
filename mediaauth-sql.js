@@ -120,7 +120,33 @@ function makeQueries(db, { homeserverName = "41chan.net" } = {}) {
     return rows.length > 0;
   }
 
-  return { queryUploader, queryIsSiteAsset, queryMediaRooms, queryUploaderJoined, queryIsEncrypted };
+  // The sampling gate's question (operator ruling 2026-10-09): one room's
+  // CURRENT power levels, its name, and who is joined to it now. Read from
+  // current_state_events -- the room as Synapse resolves it today, never a
+  // historical event -- in one round trip, because the gate asks it for every
+  // console request (sample-gate.js caches it). powerLevels is null when the
+  // room has no power-levels event on this server (a wrong room id), which the
+  // gate treats as misconfiguration, not as "nobody qualifies". Needs SELECT on
+  // current_state_events and event_json, both in the role's original grant.
+  async function queryRoomGateState(roomId) {
+    const { rows } = await db.query(
+      `select
+         (select ej.json::jsonb -> 'content'
+            from current_state_events c join event_json ej on ej.event_id = c.event_id
+           where c.room_id = $1 and c.type = 'm.room.power_levels' and c.state_key = '') as power_levels,
+         (select ej.json::jsonb #>> '{content,name}'
+            from current_state_events c join event_json ej on ej.event_id = c.event_id
+           where c.room_id = $1 and c.type = 'm.room.name' and c.state_key = '') as name,
+         (select coalesce(array_agg(c.state_key order by c.state_key), '{}')
+            from current_state_events c
+           where c.room_id = $1 and c.type = 'm.room.member' and c.membership = 'join') as joined`,
+      [roomId]
+    );
+    const r = rows[0] || {};
+    return { powerLevels: r.power_levels || null, name: r.name || null, joined: r.joined || [] };
+  }
+
+  return { queryUploader, queryIsSiteAsset, queryMediaRooms, queryUploaderJoined, queryIsEncrypted, queryRoomGateState };
 }
 
 module.exports = { makeQueries };

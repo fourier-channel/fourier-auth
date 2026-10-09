@@ -172,6 +172,17 @@ when the booru says no to an md5, the gate asks for each such page's data (at
 most eight, cached 60 s) and allows the md5 only if a live page shows it.
 Sampling unreachable is a 503 for that path only.
 
+`SAMPLE_GATE_ROOM` and `SAMPLE_GATE_LEVEL`: the sampling console's door,
+`GET /verify?gate=sample` (operator ruling 2026-10-09). A viewer whose
+`fourier_session` names a Matrix user JOINED to that room at or above that
+power level (from the room's current `m.room.power_levels`: `users[mxid]`,
+else `users_default`, else 0) passes; anyone else gets a 403 naming the room,
+the level, who can raise them and the Technetium control that sets a level
+outside the named tiers (Settings > Server permissions > Set a level in many
+rooms). Read from Synapse's database on the pool
+above, cached 15 s. Unset or malformed, the console answers 503 to everyone
+and boot and `/healthz` say why; the rest of the service is unaffected.
+
 `MEDIA_EDGE_SECRET`: the shared secret the Cloudflare Worker sends in
 `X-Fourier-Edge`. Presigned R2 URLs are released only to a request carrying
 it; every other caller of either media route gets the decision as
@@ -223,6 +234,17 @@ times when a module was added.
   `X-Fourier-Identity` (the MXID) and `X-Fourier-Session-Info` when a valid
   session is present. The proxy must strip client-supplied copies of those
   headers; the booru trusts them.
+- `GET /verify?gate=sample` -- the sampling console's door, and it fails
+  closed: 204 with `X-Fourier-View: internal` and `X-Fourier-Identity` for a
+  qualifying viewer (see `SAMPLE_GATE_ROOM`), 403 with its remedy
+  otherwise, 503 when the config, the session store or Synapse's database
+  cannot answer. An unknown `gate=` is a 400, never the bare route's 204.
+  Every refusal is a small HTML page whose one link is the way back,
+  `https://booru.41chan.net/`, with no target, so inside Technetium's panel it
+  repaints the same frame and never nests one surface in another.
+  Does not refresh the session's Matrix token. The proxy forwards with
+  `forward_auth ... uri /verify?gate=sample` and `copy_headers X-Fourier-View
+  X-Fourier-Identity`, and must strip client-supplied copies of both.
 - `GET /media/<server>/<mediaId>` (and `OPTIONS`) -- the decision plus a 302
   to a presigned URL or a `{url}` envelope. `?w=`/`?h=` snap to an allowed
   size (180, 320, 360, 720, 850); legacy `?thumb=1` means 320. Answers 403
