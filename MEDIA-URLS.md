@@ -90,6 +90,18 @@ Same day, the booru session became zero-click from Technetium: `POST
 Synapse's whoami, sets the same `fourier_session` cookie the OIDC callback
 sets. See the memory `booru-signin-bridge`.
 
+## 2026-10-09: a third route, for sampling's own host
+
+Sampling moved from `booru.41chan.net/sample` to `sample.41chan.net`
+(operator ruling 2026-10-09), and its external view and published pages
+(`sample.41chan.net/p/<hash>`) name pictures root-absolute as
+`/fourier/booru/<md5>...`. A page's `fourier_pub_<hash>` grant is host-only on
+`/fourier/booru/`, so only a route on that host receives it: the Worker now
+also owns `sample.41chan.net/fourier/booru/*` (worker/wrangler.toml), the same
+shape as the booru route. Caddy answers that path on the sample host with a
+404 that names the missing route, so a Worker without it shows as a fault, not
+as the origin serving bytes.
+
 ## Known violations still open (2026-08-15)
 
 Found while reverting an accidental fourth one. None were introduced by that
