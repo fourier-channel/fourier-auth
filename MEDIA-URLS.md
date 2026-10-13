@@ -127,14 +127,16 @@ read-only on the production box:
    (worker/wrangler.toml), asks this gate, and streams from R2, so the bytes
    no longer cross the homeserver on that path. Read from config, not from
    traffic.
-3. **fourier-auth streaming thumbnails and remote originals -- NEARLY
-   RESOLVED, measured 2026-10-13.** Recorded then as 3,724 thumbnail requests
-   in 24h through this service. Thumbnails now resolve to their R2 rendition
-   (mediar2.js lists the object's thumbnail prefix) and only the edge Worker is
-   handed the URL. What still streams is the deliberate fallback for media R2
-   does not hold ("[media] R2 release unavailable ... proxying" in this
-   service's log): 37 requests in the last 24h, 78 in the container's 3 days
-   of logs -- all for TWO remote items Synapse has rows for but neither its
-   disk nor R2 holds (cutefunny.art, ~1 MB; matrix.org, ~750 KB), re-requested
-   over and over. Open: get those into R2, or find why a re-fetch of remote
-   media does not land there under the key this service resolves.
+3. **fourier-auth streaming thumbnails and remote originals -- RESOLVED.**
+   Recorded then as 3,724 thumbnail requests in 24h through this service.
+   There is no streaming path left: since the ruling of 2026-08-15 ("There is
+   no intended fallback. None.") a request for media R2 does not hold ends in
+   a 404, "media not in object storage", and thumbnails resolve to their R2
+   rendition, handed only to the edge Worker. Verified 2026-10-13 in the
+   running container. Measured the same day: 37 such 404s in 24h, all for two
+   avatars of remote users (cutefunny.art, matrix.org) carried in old
+   membership events, which no R2 object will ever hold -- federation is off
+   (`federation_domain_whitelist: []`). The 404 is the correct answer; a
+   client draws its placeholder. One trap remains: the error branch still
+   logs "R2 release unavailable ... proxying" before the 404, so the log says
+   proxying when nothing is proxied (this misled a re-check on 2026-10-13).
