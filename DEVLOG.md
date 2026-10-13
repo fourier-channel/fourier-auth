@@ -1,3 +1,4 @@
+<!-- phase:S-55f5f9 -->
 <!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-auth/DEVLOG.md
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
@@ -428,3 +429,61 @@ Worker (`MEDIA-URLS.md`, `worker/README.md`), and the README rewrite of
 2026-09-11 that describes the service as a presigning authorization oracle
 rather than a byte proxy. Two earlier sections here are both numbered 9;
 left as written. Per WORKING-RULES 0.1 this file is history, not state.
+
+
+## 2026-10-12 -- the booru's quarantine reaches both of this gate's own doors
+
+Operator rulings 2026-10-12 (memory flagged-tags-are-a-review-quarantine):
+an admin can flag any tag for review and its posts disappear from everyone
+below Admin; a banished tag's posts disappear from everyone; reach is
+"everywhere, like jail". The booru door already follows the booru's answer.
+The Matrix door (room check) and a publication's grant (sampling) did not.
+
+- New `booru-quarantine.js`: polls `GET /fourier_jail/release.json?quarantine=1`
+  as the booru account `gate` every 30 s (ETag/304, paging with a whole-set
+  generation, restart at most 3 times, shape check), holds md5s and mxc ids
+  in memory, never a tag name. `check()` throws `QuarantineUnavailable` with
+  no good read or one older than 180 s.
+- Matrix door: after the room check, before any release, refused by mxc and
+  by every md5 the image's one file is known under (`mediar2.js localMd5s`:
+  md5, raw_md5, booru.md5 -- the contract named idx.md5 alone; the booru can
+  hold a Matrix image under either of the other two, as booruVariantKey
+  already knows). 404 "No such image.", or 503 fail closed.
+- Grant path (`booru-route.js`): a quarantined md5 is refused before the page
+  is asked; unreadable is a 503 for that path only.
+- Review the same day: a file canon serves as it is (kind `source`, e.g. a
+  4chan webm re-posted in a room) had no md5, so the Matrix door could not
+  match it to a flagged booru post holding the same bytes. canon.js now
+  records `raw_md5` on a source index (fourier-tunnel) and `localMd5s`
+  returns it. Source indexes written before then still name none.
+- Lamps: `quarantine-refused` (amber), `quarantine-unavailable` (red), and
+  `booru-quarantine` on /healthz (red exactly when the doors would refuse).
+- Draft G-: a 304 must count as a successful read, or an unchanged quarantine
+  goes stale and closes every Matrix picture after 180 s.
+- Deploy waits on: chanbooru's quarantine build, the `gate` account and its
+  scoped key, and both variables in `.env` before the restart.
+
+### Later on 2026-10-12 -- operator rulings on the open questions
+
+- Stale grace: a booru that cannot be read leaves the LAST GOOD quarantine
+  document deciding for 30 min (was: 180 s, then 503 for every Matrix
+  picture). `/healthz`'s `booru-quarantine` check is red from the first
+  minute and the crossing is logged once (`[quarantine] STALE`); past 30 min
+  the doors fail closed as before. A tag flagged during an outage takes
+  effect when the booru returns.
+- Reviewing a flagged Matrix post: the document's rows that are flagged, not
+  banished, not jailed and mxc-sourced are "reviewable". The booru door releases such a
+  file to a reader whose OWN booru session sees the post
+  (`booru-visibility.js readerSees`, never the anonymous answer, which can be
+  a cached yes for 120 s after a flag). Rooms still refuse it to everyone.
+  An unreadable quarantine opens nothing there (the refusal stands, logged).
+- Jailed posts: the booru's document now lists troll_jail-only posts too, so
+  the Matrix door refuses jailed Matrix media; every row is refused whatever
+  its flags say.
+- Worker: Matrix decision TTL 240 s -> 150 s, so the Matrix door meets jail's
+  ~3 min bound (30 s poll + 150 s). Needs a `wrangler deploy` of the Worker.
+- Adversarial review, same day: a jailed row is no longer reviewable even
+  when it is also flagged (the booru hides it from admins anyway; now this
+  file does not depend on that), and a 401/403 from the quarantine read
+  carries the booru's own sentence -- a `gate` account still at Member is told
+  to have an admin promote it, instead of "not listed, or a wrong key".

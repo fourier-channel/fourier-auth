@@ -57,6 +57,18 @@
 //                      -- and until 2026-10-05 it was also thirteen 4chan posts
 //                      404ing with no trace anywhere. Worth a look if it repeats.
 //
+// The quarantine (operator rulings 2026-10-12; booru-quarantine.js) adds two:
+//
+//   quarantine_refused     an image refused at the Matrix door or on a
+//                          publication's grant because the booru's quarantine
+//                          document names it (a flagged or banished tag, or
+//                          troll_jail).
+//                          AMBER: flagged media is being asked for while it
+//                          awaits review. The detail is the path, never a tag.
+//   quarantine_unavailable the quarantine document could not be read (or is
+//                          past its bound), so the Matrix door answered 503 and
+//                          grants were refused (fail closed). RED, with the fix.
+//
 // WHO SEES THE DETAIL (F-G5). The "last:" strings name mxc ids and Matrix user
 // ids. health({ detail: false }) leaves them out -- levels, labels and counts
 // only -- and that is what a public caller of /healthz gets.
@@ -67,7 +79,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [], quarantine_refused: [], quarantine_unavailable: [] };
     this.last = {};
   }
 
@@ -94,6 +106,8 @@ class GateSignals {
   matrixRefused(detail) { this.#note("matrix_refused", detail); }
   publicationsUnavailable(detail) { this.#note("publications_unavailable", detail); }
   publicationGranted(detail) { this.#note("publication_grants", detail); }
+  quarantineRefused(detail) { this.#note("quarantine_refused", detail); }
+  quarantineUnavailable(detail) { this.#note("quarantine_unavailable", detail); }
 
   counts(at = this.now()) {
     const out = {};
@@ -178,6 +192,22 @@ class GateSignals {
         detail: c.publications_unavailable > 0
           ? `${c.publications_unavailable} check(s) failed in 10 min -- a published page's restricted pictures refused while sampling cannot answer${last("publications_unavailable")}`
           : `${c.publication_grants} granted in 10 min`,
+      },
+      {
+        id: "quarantine-refused",
+        label: "pictures refused: in the booru's quarantine (flagged or banished tag, or jailed)",
+        level: c.quarantine_refused > 0 ? "amber" : "green",
+        detail: c.quarantine_refused > 0
+          ? `${c.quarantine_refused} in 10 min at the Matrix door or a publication's grant -- flagged media awaiting review in the booru's queue${last("quarantine_refused")}`
+          : "none in 10 min",
+      },
+      {
+        id: "quarantine-unavailable",
+        label: "booru quarantine document readable",
+        level: c.quarantine_unavailable > 0 ? "red" : "green",
+        detail: c.quarantine_unavailable > 0
+          ? `${c.quarantine_unavailable} picture(s) refused in 10 min because the quarantine could not be read -- check BOORU_QUARANTINE_LOGIN / BOORU_QUARANTINE_API_KEY, that the account is in Danbooru.config.fourier_quarantine_reader_names, and that chanbooru is deployed with the quarantine build${last("quarantine_unavailable")}`
+          : "no refusals for an unreadable quarantine in 10 min",
       },
     ];
     const level = checks.some((x) => x.level === "red") ? "red" : checks.some((x) => x.level === "amber") ? "amber" : "ok";

@@ -197,6 +197,33 @@ async function localIndex(s3, bucket, { mediaId, cache, askCanon }) {
   return { idx, asked };
 }
 
+// EVERY MD5 A LOCAL MATRIX IMAGE'S FILE IS KNOWN UNDER, for the booru's
+// quarantine (booru-quarantine.js; operator rulings 2026-10-12). The booru
+// holds the image as its one file (idx.md5), as the raw upload a tunnel post
+// made before stripping existed (idx.raw_md5), or under a third md5 canon
+// found it under (idx.booru.md5) -- the list booruVariantKey searches. Through
+// localIndex, so an image with no index yet is made canonical first, exactly
+// as its original's release would. A file canon serves as it is (kind
+// "source": not an image it makes canonical -- a webm, say) is known by the
+// md5 of its bytes, which canon records as raw_md5 (fourier-tunnel canon.js,
+// 2026-10-12): a 4chan webm the booru holds under a flagged post, re-posted in
+// a room, is those same bytes. A source index written before then names no
+// md5, and neither has a refused or gone image: the caller checks the mxc
+// alone. Canon unreachable THROWS (CANON_UNAVAILABLE): an md5 that cannot be
+// learned cannot be cleared.
+async function localMd5s(s3, bucket, { mediaId, cache, askCanon }) {
+  let idx;
+  try {
+    ({ idx } = await localIndex(s3, bucket, { mediaId, cache, askCanon }));
+  } catch (err) {
+    if (err instanceof OriginalUnavailable && (err.code === "GONE" || err.code === "WITHHELD")) return [];
+    throw err;
+  }
+  if (idx.kind === "source") return [idx.raw_md5].filter(isMd5);
+  if (idx.kind !== "canonical") return [];
+  return [...new Set([idx.md5, idx.rawMd5, idx.raw_md5, idx.booru && idx.booru.md5].filter(isMd5))];
+}
+
 // canon.js answers the gate over the docker network (fourier-tunnel's
 // startCanonService). POST so a crawler following links never triggers it.
 function canonClient({ axios, baseUrl, timeoutMs = 30000 }) {
@@ -351,6 +378,7 @@ module.exports = {
   booruVariantKey,
   resolveR2Key,
   canonicalOriginalKey,
+  localMd5s,
   canonClient,
   OriginalUnavailable,
   THUMB_KEYS_TTL,

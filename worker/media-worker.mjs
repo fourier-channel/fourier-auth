@@ -162,7 +162,10 @@ export async function resolveUpstream(fetchImpl, url, credentials, edge = {}) {
 /**
  * How long an ALLOW is reused at the edge, by kind.
  *
- * Matrix media: 240 s (operator ruling 2026-08-16, below).
+ * Matrix media: 150 s. The 2026-08-16 ruling ("cached is cached", below)
+ * set 240 s; on 2026-10-12 it came down to 150 s so that a just-flagged or
+ * just-jailed Matrix image -- refused by fourier-auth within its 30 s
+ * quarantine poll (booru-quarantine.js) -- stops within jail's ~3 min.
  *
  * Booru media: 60 s. Its decision now carries post VISIBILITY (leak audit
  * F-G1): a post jailed or deleted after a reader's allow was cached keeps
@@ -173,7 +176,7 @@ export async function resolveUpstream(fetchImpl, url, credentials, edge = {}) {
  * minute, which the gate answers from Redis.
  */
 export function decisionTtl(kind) {
-  return kind === "booru" ? 60 : 240;
+  return kind === "booru" ? 60 : 150;
 }
 
 /** The file extension a saved copy of this media type should carry. */
@@ -403,11 +406,12 @@ export default {
     // ruling 2026-08-16: "Cached is cached. If the user could see it before,
     // continuing to allow them to see it for another 5 minutes is harmless."
     //
-    // 240s, not 300: the decision carries a presigned URL that fourier-auth
-    // mints for 300s, so a shorter TTL guarantees at least 60s of life left on
-    // any URL served from cache. Handing out a credential about to expire is
-    // the failure the old client's REUSE_MARGIN_MS existed to avoid. Booru
-    // media is shorter still -- see decisionTtl.
+    // Under 300s: the decision carries a presigned URL that fourier-auth
+    // mints for 300s, so a TTL of at most 240s guarantees at least 60s of
+    // life left on any URL served from cache. Handing out a credential about
+    // to expire is the failure the old client's REUSE_MARGIN_MS existed to
+    // avoid. The TTLs themselves (150 s Matrix, 60 s booru) are bounds on how
+    // long a just-hidden image keeps serving -- see decisionTtl.
     //
     // ALLOWS ONLY. A cached denial would lock a user out of a room they just
     // joined for the rest of the window, and denials are cheap to re-ask.

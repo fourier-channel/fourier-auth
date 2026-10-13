@@ -1,3 +1,4 @@
+<!-- phase:S-3552c8 -->
 <!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-auth/README.md
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
@@ -39,7 +40,8 @@ Bridge) and technetium.
    authenticated-media endpoint is NOT used, because it authenticates the
    token but does not enforce room membership. Booru media asks a different
    authority -- the booru, whether a post the reader may see carries that
-   md5.
+   md5. Either way, an image the booru has quarantined (a flagged or banished
+   tag) is refused through every door.
 3. If allowed, and the caller is the edge Worker (it proves that with
    `MEDIA_EDGE_SECRET`), the service presigns the object in R2 and answers
    with a 302 to that URL, or a JSON `{url}` envelope for cross-origin
@@ -171,6 +173,32 @@ images never. A live page sets `fourier_pub_<hash>` on `/fourier/booru/`, and
 when the booru says no to an md5, the gate asks for each such page's data (at
 most eight, cached 60 s) and allows the md5 only if a live page shows it.
 Sampling unreachable is a 503 for that path only.
+
+`BOORU_QUARANTINE_LOGIN` and `BOORU_QUARANTINE_API_KEY` (both in the
+gitignored `.env`, the key entered with `read -s`): the booru account (`gate`,
+named in the booru's `Danbooru.config.fourier_quarantine_reader_names` and
+promoted above Member by an admin; its key scoped to `fourier_jail:index`
+with no IP list, since the booru's ApiKey refuses private addresses) that
+reads the booru's QUARANTINE document,
+`GET /fourier_jail/release.json?quarantine=1` on `BOORU_INTERNAL_URL`, every
+30 s with `If-None-Match` (operator rulings 2026-10-12: a flagged or banished
+tag's posts disappear everywhere, like jail). It lists every post carrying a
+flagged or banished tag, or troll_jail, by md5 and Matrix id; fourier-auth
+holds those in memory only and never a tag name. The Matrix door refuses
+such an image to every reader, admins included (404 "No such image.", after
+the room check, by mxc and by every md5 its one file is known under), and a
+published page's grant never reaches one. The booru door hides those posts
+by the booru's own answer, with ONE opening: a FLAGGED post that came from
+Matrix is released at the booru door to a reader whose own booru session
+sees it (an Admin reviewing it; asked as that reader, never anonymously).
+When the booru cannot be read, the last good document keeps deciding for 30
+minutes (a tag flagged meanwhile takes effect when it returns), and the
+`booru-quarantine` check on `/healthz` is red from the first minute. Fail
+closed: either variable unset, no good read yet, or the last good read older
+than 30 minutes, and the Matrix door answers 503 and the grant path refuses;
+boot and that check say why. From a flag to a refusal: about 90 s for a
+grant, about 3 min at the Matrix door (30 s poll plus the Worker's 150 s
+Matrix decision cache).
 
 `SAMPLE_GATE_ROOM` and `SAMPLE_GATE_LEVEL`: the sampling console's door,
 `GET /verify?gate=sample` (operator ruling 2026-10-09). A viewer whose

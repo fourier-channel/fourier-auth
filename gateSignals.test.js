@@ -6,11 +6,11 @@ const { GateSignals, WINDOW_MS } = require("./gateSignals");
 // The lamp: a signed-in reader refused turns the gate's health red; the
 // counts age out after ten minutes; a fresh gate is green.
 
-test("a fresh gate is green with nine clear checks", () => {
+test("a fresh gate is green with eleven clear checks", () => {
   const g = new GateSignals(() => 1_000_000);
   const h = g.health();
   assert.equal(h.level, "ok");
-  assert.deepEqual(h.checks.map((c) => c.level), ["green", "green", "green", "green", "green", "green", "green", "green", "green"]);
+  assert.deepEqual(h.checks.map((c) => c.level), Array(11).fill("green"));
 });
 
 test("a refusal is sorted by why: a dead session is RED, an image in no room AMBER, a non-member GREEN", () => {
@@ -103,6 +103,8 @@ test("F-G5: without detail, no check carries a last-seen mxc id or Matrix user i
   g.booruHidden("/booru/0123456789abcdef0123456789abcdef");
   g.matrixRefused("/booru/fedcba9876543210fedcba9876543210 is Matrix media mxc SECRETMEDIAID4");
   g.publicationsUnavailable("sampling at 172.18.0.1:5181 timed out");
+  g.quarantineRefused("/media/41chan.net/SECRETMEDIAID5");
+  g.quarantineUnavailable("booru at 172.18.0.5:3000 refused");
   const pub = JSON.stringify(g.health(undefined, { detail: false }));
   for (const leak of ["SECRETMEDIAID", "@alice", "@bob", "172.18.0.5", "172.18.0.1", "0123456789abcdef", "fedcba9876543210", "last:"]) {
     assert.ok(!pub.includes(leak), `public health leaks ${leak}`);
@@ -114,4 +116,28 @@ test("F-G5: without detail, no check carries a last-seen mxc id or Matrix user i
   // And the private view keeps everything.
   const priv = JSON.stringify(g.health());
   for (const kept of ["SECRETMEDIAID", "@alice", "@bob"]) assert.ok(priv.includes(kept), kept);
+});
+
+// -- the quarantine (operator rulings 2026-10-12) -----------------------------
+
+test("QUARANTINE: a refusal is AMBER and counted; it never names a tag", () => {
+  const g = new GateSignals(() => 1_000_000);
+  g.quarantineRefused("/media/41chan.net/abc");
+  const h = g.health();
+  assert.equal(h.level, "amber");
+  const c = h.checks.find((x) => x.id === "quarantine-refused");
+  assert.equal(c.level, "amber");
+  assert.match(c.detail, /^1 in 10 min/);
+  assert.equal(h.counts.quarantine_refused, 1);
+});
+
+test("QUARANTINE: unreadable is RED and the detail says how to fix it", () => {
+  const g = new GateSignals(() => 1_000_000);
+  g.quarantineUnavailable("BOORU_QUARANTINE_LOGIN and BOORU_QUARANTINE_API_KEY are unset");
+  const h = g.health();
+  assert.equal(h.level, "red");
+  const c = h.checks.find((x) => x.id === "quarantine-unavailable");
+  assert.equal(c.level, "red");
+  assert.match(c.detail, /BOORU_QUARANTINE_API_KEY/);
+  assert.match(g.health(undefined, { detail: false }).checks.find((x) => x.id === "quarantine-unavailable").detail, /fourier_quarantine_reader_names/, "the remedy is public; the last reason is not");
 });

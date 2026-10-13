@@ -17,6 +17,7 @@ const { BooruUnavailable } = require("./booru-visibility");
 const { GateSignals } = require("./gateSignals");
 const { isEdgeCaller } = require("./callers");
 const { pubHashes, PublicationsUnavailable } = require("./publication-grants");
+const { QuarantineUnavailable } = require("./booru-quarantine");
 
 const VISIBLE = "a".repeat(32);
 const JAILED = "b".repeat(32);
@@ -29,6 +30,16 @@ const PUB = "d".repeat(32);
 // file is a Matrix image's one file and is served only through the Matrix door.
 const MATRIX_POSTED = "e".repeat(32);
 const MXC_ID = "qjbTsnSicsuUyzSjxsOidXSJ";
+// A restricted-tag image a live publication shows, whose post now carries a
+// flagged (or banished) tag: in the booru's quarantine document.
+const QUARANTINED = "f".repeat(32);
+// A FLAGGED post that came from Matrix (source mxc://): its file is a Matrix
+// image's one file, and the quarantine document marks it reviewable. An Admin
+// reviewing it on the booru is admitted by their own booru session (operator
+// ruling 2026-10-12); the Matrix door still refuses it to everyone.
+const FLAGGED_MXC = "9".repeat(32);
+const ADMIN_COOKIE = { cookie: "_danbooru2_session=ADMIN%2Bsess" };
+const MEMBER_COOKIE = { cookie: "_danbooru2_session=MEMBER%2Bsess" };
 
 function harness(over = {}) {
   const presigned = [];
@@ -51,12 +62,22 @@ function harness(over = {}) {
       sees: async (md5, viewer) => { asked.push({ md5, viewer }); return md5 === VISIBLE || md5 === MATRIX_POSTED; },
       // VISIBLE is a 4chan-sourced post; MATRIX_POSTED is mxc-sourced.
       seesNonMatrix: async (md5, viewer) => { asked.push({ md5, viewer, nonMatrix: true }); return md5 === VISIBLE; },
+      // Asked AS the reader only. The admin's own session sees the flagged
+      // post, and (by the booru's deleted-post rule) the jailed one.
+      readerSees: async (md5, viewer) => {
+        asked.push({ md5, viewer, reader: true });
+        return !!viewer && viewer.sessionCookie === "ADMIN%2Bsess" && (md5 === FLAGGED_MXC || md5 === JAILED);
+      },
     },
     matrixIndexOf: async (md5) => ({ mxc_media_id: MXC_ID, key: `media/${md5}.png` }),
     presign: async (key, disp) => { presigned.push({ key, disp }); return `https://acct.r2.example/bucket/${key}?X-Amz-Credential=AKIA%2Fx&X-Amz-Signature=sig`; },
     isEdge: (headers) => isEdgeCaller(headers, SECRET),
     pubHashes,
-    publications: { grants: async (md5, hashes) => { pubAsks.push({ md5, hashes }); return hashes.includes(PUB) && md5 === RESTRICTED; } },
+    publications: { grants: async (md5, hashes) => { pubAsks.push({ md5, hashes }); return hashes.includes(PUB) && (md5 === RESTRICTED || md5 === QUARANTINED); } },
+    quarantine: {
+      check: ({ md5 }) => (md5 === QUARANTINED || md5 === FLAGGED_MXC ? "refuse" : "allow"),
+      reviewable: (md5) => md5 === FLAGGED_MXC,
+    },
     signals,
     log: { error: (m) => logs.push(m), warn: (m) => logs.push(m) },
     ...over,
@@ -283,4 +304,90 @@ test("PUB: sampling unreachable is a 503 for the publication path only, loud and
   // The ordinary booru path does not touch sampling.
   const ok = await call(handler, `${VISIBLE}.png`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
   assert.equal(ok.statusCode, 200);
+});
+
+// -- the quarantine (operator rulings 2026-10-12: flagged and banished tags
+// disappear everywhere, like jail -- a publication's grant included) --------
+
+test("QUARANTINE: a quarantined md5 is refused even with a live grant cookie, and the page is never asked", async () => {
+  const { handler, presigned, pubAsks, signals } = harness();
+  for (const query of [{}, { w: "360" }]) {
+    const res = await call(handler, `${QUARANTINED}.jpg`, { query, headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+    assert.equal(res.statusCode, 404, JSON.stringify(query));
+    assert.equal(res.headers["cache-control"], "no-store");
+    assert.ok(!leaksCredential(res));
+  }
+  assert.equal(presigned.length, 0);
+  assert.equal(pubAsks.length, 0, "the grant is not even consulted");
+  assert.equal(signals.counts().quarantine_refused, 2);
+  // A restricted md5 that is not quarantined is still granted.
+  const res = await call(handler, `${RESTRICTED}.jpg`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+  assert.equal(res.statusCode, 200);
+});
+
+test("QUARANTINE: unreadable on the grant path is a 503, loud and RED; the booru path is untouched", async () => {
+  const { handler, logs, signals, presigned } = harness({
+    quarantine: { check: () => { throw new QuarantineUnavailable("the booru's quarantine document has not been read yet"); } },
+  });
+  const res = await call(handler, `${RESTRICTED}.jpg`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } });
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.headers["retry-after"], "2");
+  assert.equal(res.headers["cache-control"], "no-store");
+  assert.equal(presigned.length, 0);
+  assert.ok(logs.some((l) => /QUARANTINE UNREADABLE/.test(l)));
+  assert.equal(signals.health().checks.find((c) => c.id === "quarantine-unavailable").level, "red");
+  // A visible post (the booru decides it, and hides quarantined posts itself)
+  // and a no-cookie refusal never consult the quarantine.
+  assert.equal((await call(handler, `${VISIBLE}.png`, { headers: EDGE, cookies: { [`fourier_pub_${PUB}`]: "1" } })).statusCode, 200);
+  assert.equal((await call(handler, `${RESTRICTED}.jpg`, { headers: EDGE })).statusCode, 404);
+});
+
+// -- reviewing a flagged Matrix post on the booru (operator ruling 2026-10-12)
+
+test("REVIEW: a flagged Matrix post's file is released to a reader whose own booru session sees it -- original and variants", async () => {
+  const { handler, presigned, asked, signals } = harness({ isMatrixImage: async () => true });
+  const orig = await call(handler, `${FLAGGED_MXC}.png`, { headers: { ...EDGE, ...ADMIN_COOKIE } });
+  assert.equal(orig.statusCode, 200);
+  assert.match(orig.body.url, /media\/9{32}\.png/);
+  const thumb = await call(handler, `${FLAGGED_MXC}.jpg`, { query: { w: "180", h: "180" }, headers: { ...EDGE, ...ADMIN_COOKIE } });
+  assert.equal(thumb.statusCode, 200);
+  assert.equal(presigned.length, 2);
+  const reader = asked.filter((a) => a.reader);
+  assert.ok(reader.length > 0 && reader.every((a) => a.viewer.sessionCookie === "ADMIN%2Bsess"), "asked as the reader, by their session as sent");
+  assert.equal(signals.counts().matrix_refused, 0);
+});
+
+test("REVIEW: no booru session, or a session that does not see the post, is refused as before -- and the reader is not asked without one", async () => {
+  const { handler, presigned, asked } = harness({ isMatrixImage: async () => true });
+  const anon = await call(handler, `${FLAGGED_MXC}.png`, { headers: EDGE });
+  assert.equal(anon.statusCode, 404);
+  assert.equal(asked.filter((a) => a.reader).length, 0, "no session, no ask");
+  const member = await call(handler, `${FLAGGED_MXC}.png`, { headers: { ...EDGE, ...MEMBER_COOKIE } });
+  assert.equal(member.statusCode, 404);
+  assert.equal(member.headers["cache-control"], "no-store");
+  assert.equal(presigned.length, 0);
+});
+
+test("REVIEW: only a REVIEWABLE md5 opens -- a jailed, banished or unflagged Matrix file stays refused even when the admin's booru sees its post", async () => {
+  const { handler, presigned, asked } = harness({ isMatrixImage: async () => true });
+  for (const md5 of [JAILED, MATRIX_POSTED]) {
+    const res = await call(handler, `${md5}.png`, { headers: { ...EDGE, ...ADMIN_COOKIE } });
+    assert.equal(res.statusCode, 404, md5);
+  }
+  assert.equal(presigned.length, 0);
+  assert.equal(asked.filter((a) => a.reader).length, 0, "the booru is not asked about a file that is not reviewable");
+});
+
+test("REVIEW: an unreadable quarantine admits nobody -- the refusal stands and says why", async () => {
+  const { handler, presigned, logs } = harness({
+    isMatrixImage: async () => true,
+    quarantine: {
+      check: () => { throw new QuarantineUnavailable("past the 1800s bound"); },
+      reviewable: () => { throw new QuarantineUnavailable("past the 1800s bound"); },
+    },
+  });
+  const res = await call(handler, `${FLAGGED_MXC}.png`, { headers: { ...EDGE, ...ADMIN_COOKIE } });
+  assert.equal(res.statusCode, 404);
+  assert.equal(presigned.length, 0);
+  assert.ok(logs.some((l) => l.includes(FLAGGED_MXC) && /quarantine/.test(l) && /1800s/.test(l)), logs.join("\n"));
 });

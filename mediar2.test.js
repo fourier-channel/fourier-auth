@@ -365,3 +365,43 @@ test("the booru holding a post under a third md5 (older strip rules): canon reco
   });
   assert.equal(await booruVariantKey(s3, "b", { mediaId: "x", thumbSize: 320 }), `variants/${THIRD}/360x360.jpg`);
 });
+
+// THE QUARANTINE'S MD5 FOR A MATRIX IMAGE (booru-quarantine.js, rulings
+// 2026-10-12). The booru may hold the image under its one file's md5, the raw
+// upload's (a tunnel post made before stripping), or a third (canon's
+// idx.booru.md5) -- the same list booruVariantKey searches. Each is checked.
+const { localMd5s } = require("./mediar2");
+
+test("localMd5s: every md5 the image's file is known under, deduplicated", async () => {
+  const s3 = fakeS3({ [IDX]: { kind: "canonical", key: ONE, md5: MD5, raw_md5: RAW, booru: { md5: MD5 } } });
+  assert.deepEqual(await localMd5s(s3, "b", { mediaId: MEDIA, askCanon: async () => { throw new Error("not asked"); } }), [MD5, RAW]);
+});
+
+test("localMd5s: no index yet asks canon, as the original's release would", async () => {
+  const s3 = fakeS3({});
+  let asked = 0;
+  const out = await localMd5s(s3, "b", { mediaId: MEDIA, cache: memCache(), askCanon: async () => { asked++; return { kind: "canonical", key: ONE, md5: MD5, raw_md5: MD5 }; } });
+  assert.deepEqual(out, [MD5]);
+  assert.equal(asked, 1);
+});
+
+test("localMd5s: no canonical file (not an image, refused, gone) is no md5 -- the mxc alone is checked", async () => {
+  assert.deepEqual(await localMd5s(fakeS3({ [IDX]: { kind: "source", key: localOriginalKey(MEDIA) } }), "b", { mediaId: MEDIA, askCanon: async () => ({}) }), []);
+  assert.deepEqual(await localMd5s(fakeS3({ [IDX]: { kind: "refused", reason: "AVIF" } }), "b", { mediaId: MEDIA, askCanon: async () => ({}) }), []);
+  const gone = async () => { throw Object.assign(new Error("no such media"), { status: 404 }); };
+  assert.deepEqual(await localMd5s(fakeS3({}), "b", { mediaId: MEDIA, askCanon: gone }), []);
+});
+
+test("localMd5s: a file canon leaves as it is (kind source: a webm, say) is checked by the md5 of its bytes when canon recorded one", async () => {
+  // Review 2026-10-12: a 4chan webm the booru holds under a FLAGGED post,
+  // re-posted in a Matrix room, is the same bytes; with no md5 the door could
+  // only ask by mxc, which is the room's own and in no booru post.
+  assert.deepEqual(await localMd5s(fakeS3({ [IDX]: { kind: "source", key: localOriginalKey(MEDIA), raw_md5: RAW } }), "b", { mediaId: MEDIA, askCanon: async () => ({}) }), [RAW]);
+});
+
+test("localMd5s: canon unreachable throws CANON_UNAVAILABLE -- the md5 cannot be learned, so it cannot be cleared", async () => {
+  await assert.rejects(
+    () => localMd5s(fakeS3({}), "b", { mediaId: MEDIA, askCanon: async () => { throw new Error("ECONNREFUSED"); } }),
+    (err) => err instanceof OriginalUnavailable && err.code === "CANON_UNAVAILABLE",
+  );
+});

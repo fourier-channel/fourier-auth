@@ -40,7 +40,8 @@ const { createBooruVisibility, booruPostsClient } = require("./booru-visibility"
 const { makeBooruHandler } = require("./booru-route");
 const { createPublicationGrants, samplingPublicationClient, pubHashes } = require("./publication-grants");
 const crypto = require("crypto");
-const { resolveR2Key, canonClient, OriginalUnavailable } = require("./mediar2");
+const { resolveR2Key, localMd5s, canonClient, OriginalUnavailable } = require("./mediar2");
+const { booruQuarantineClient, createQuarantine, QuarantineUnavailable, matrixDoorVerdict, quarantineConfigProblem } = require("./booru-quarantine");
 // fourier-tunnel's canon.js, over the docker network: it makes a Matrix image into
 // the ONE stripped file the gate then serves (see mediar2.js canonicalOriginalKey).
 const askCanon = canonClient({ axios, baseUrl: process.env.CANON_URL || "http://fourier-tunnel:8011" });
@@ -153,6 +154,22 @@ const publicationGrants = createPublicationGrants({
   cacheSet: cacheSetJson,
 });
 
+// THE BOORU'S QUARANTINE (operator rulings 2026-10-12): every post carrying a
+// flagged or banished tag disappears everywhere, like jail (and the document
+// lists jailed posts too, so jailed Matrix media is refused). The booru door
+// needs nothing for it (the booru hides those posts itself); the Matrix door
+// and a publication's grant ask this, polled every 30 s from the booru as the
+// account `gate` (booru-quarantine.js). A booru that stops answering leaves the
+// last good document deciding for 30 min, red on /healthz from the first
+// minute (operator ruling 2026-10-12); past that, or with unset credentials,
+// both refuse: fail closed, so set them BEFORE the restart.
+const BOORU_QUARANTINE_LOGIN = process.env.BOORU_QUARANTINE_LOGIN || "";
+const BOORU_QUARANTINE_API_KEY = process.env.BOORU_QUARANTINE_API_KEY || "";
+const quarantine = createQuarantine({
+  fetchDoc: booruQuarantineClient({ axios, baseUrl: BOORU_INTERNAL_URL, login: BOORU_QUARANTINE_LOGIN, apiKey: BOORU_QUARANTINE_API_KEY }),
+  problem: quarantineConfigProblem({ login: BOORU_QUARANTINE_LOGIN, apiKey: BOORU_QUARANTINE_API_KEY }),
+}).start();
+
 // What the boot-time schema check found, for /healthz. null until it has run.
 let schemaReport = null;
 
@@ -192,6 +209,7 @@ app.get("/healthz", async (req, res) => {
   try { redisOk = (await redisPing()) === "PONG"; } catch (e) {}
   const detail = healthDetailAllowed(req.socket && req.socket.remoteAddress, req.headers);
   const gate = signals.health(undefined, { detail });
+  const q = quarantine.health();
   const checks = [
     { id: "redis", label: "session store", level: redisOk ? "green" : "red", detail: redisOk ? "PONG" : "no PONG from Redis" },
     {
@@ -217,6 +235,18 @@ app.get("/healthz", async (req, res) => {
       detail: !schemaReport ? "not checked yet"
         : schemaReport.ok === true ? "present"
         : detail ? schemaReport.detail : "see the service log",
+    },
+    {
+      id: "booru-quarantine",
+      label: "booru quarantine document read (flagged and banished tags)",
+      // Red when the doors refuse for want of it, AND from the first minute of
+      // the 30-minute stale grace, while the last good document still decides.
+      level: q.level,
+      detail: q.level === "green" ? `generation ${q.generation}, read ${q.checkedAt}`
+        : detail ? q.reason
+        : q.grace ? "STALE: the booru has not been read for over a minute; the last good document decides until it is 30 min old, then every Matrix picture answers 503; see the service log"
+        : q.level === "red" ? "unreadable: the Matrix door answers 503 and publication grants are refused; see the service log"
+        : "the last read failed; the last good document is still inside its bound",
     },
     ...gate.checks,
   ];
@@ -458,6 +488,7 @@ app.get("/booru/:file", makeBooruHandler({
   visibility: booruVisibility,
   pubHashes,
   publications: publicationGrants,
+  quarantine,
   presign: (key, disposition) => getSignedUrl(s3, new GetObjectCommand({
     Bucket: R2_BUCKET,
     Key: key,
@@ -544,6 +575,45 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     // the lamp, never the response, which must not say why.
     if (viaSession) signals.sessionRefused(403, `/media/${serverName}/${mediaId}`, decision.reason);
     return res.status(403).json({ error: "not authorized for this media" });
+  }
+
+  // THE QUARANTINE, before anything is released (operator rulings 2026-10-12;
+  // booru-quarantine.js). An image whose booru post carries a flagged or
+  // banished tag, or troll_jail (jailed means deleted, shown nowhere), is
+  // refused to EVERY Matrix reader, admins included -- this gate knows no
+  // booru level for a Matrix token; admins review a flagged one on the booru,
+  // whose door admits them by their own booru session (booru-route.js).
+  // Asked after the room check, so a reader outside the room still gets the
+  // 403 and learns nothing. Checked by mxc, and for local media by every md5
+  // its one file is known under (mediar2.js localMd5s, cached with canon's
+  // index). The answer is the same "No such image." a gone image gets.
+  try {
+    const verdict = await matrixDoorVerdict({
+      quarantine,
+      serverName,
+      mediaId,
+      md5s: () => (r2Enabled && serverName === HOMESERVER_NAME
+        ? localMd5s(s3, R2_BUCKET, { mediaId, cache: { get: cacheGetJson, set: cacheSetJson }, askCanon })
+        : []),
+    });
+    if (verdict === "refuse") {
+      signals.quarantineRefused(`/media/${serverName}/${mediaId}`);
+      res.set("Cache-Control", "no-store");
+      return res.status(404).json({ errcode: "M_NOT_FOUND", error: "No such image." });
+    }
+  } catch (err) {
+    res.set("Cache-Control", "no-store");
+    res.set("Retry-After", "2");
+    if (err instanceof QuarantineUnavailable) {
+      console.error(`[media] QUARANTINE UNREADABLE -- refusing (fail closed): ${err.message}`);
+      signals.quarantineUnavailable(err.message);
+      return res.status(503).json({ errcode: "M_UNKNOWN", error: "media authorization temporarily unavailable" });
+    }
+    // The image's md5 could not be learned (canon unreachable, the bucket
+    // unreadable), so it cannot be cleared: the same 503 the original's own
+    // release would give, never a release.
+    console.error(`[media] ${serverName}/${mediaId}: quarantine check could not learn its md5 -- refusing (fail closed): ${err.message}`);
+    return res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
   }
 
   // R2 release, for EVERY class of media this gate can serve -- local and

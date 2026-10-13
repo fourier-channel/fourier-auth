@@ -42,6 +42,13 @@ services:
       # internal door on this network's gateway (ruling 2026-10-02). Needs the
       # Caddy :5181 block and ops/hetzner/firewall/auth-to-sampling.sh.
       - SAMPLING_INTERNAL_URL=http://172.18.0.1:5181
+      # The booru's quarantine (flagged and banished tags; operator rulings
+      # 2026-10-12), read as the booru account named in
+      # Danbooru.config.fourier_quarantine_reader_names. Both in .env. Unset
+      # means every Matrix picture answers 503 (fail closed): set them BEFORE
+      # the restart. booru-quarantine.js.
+      - BOORU_QUARANTINE_LOGIN=${BOORU_QUARANTINE_LOGIN}
+      - BOORU_QUARANTINE_API_KEY=${BOORU_QUARANTINE_API_KEY}
       - HOMESERVER_NAME=41chan.net
       # The sampling console on sample.41chan.net opens to a Matrix user at or
       # above this power level in this room, joined (operator ruling

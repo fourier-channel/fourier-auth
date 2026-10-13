@@ -242,7 +242,20 @@ function createBooruVisibility(deps, opts = {}) {
     return (await ask("v" + deps.hashKey(viewer.sessionCookie), viewer, md5)).nm;
   }
 
-  return { sees, seesNonMatrix, pendingCount: () => inflight.size };
+  /**
+   * true when THIS READER's own booru session sees a post for md5 -- asked as
+   * them, never anonymously: the anonymous answer can still be a cached yes
+   * for TTL.visible after a post is hidden, and must not stand in for theirs.
+   * false with no session. The booru door's question for a flagged Matrix
+   * post's file, opened to a reviewer (booru-route.js; operator ruling
+   * 2026-10-12). Throws BooruUnavailable.
+   */
+  async function readerSees(md5, viewer = null) {
+    if (!viewer || !viewer.sessionCookie) return false;
+    return (await ask("v" + deps.hashKey(viewer.sessionCookie), viewer, md5)).v;
+  }
+
+  return { sees, seesNonMatrix, readerSees, pendingCount: () => inflight.size };
 }
 
 module.exports = { createBooruVisibility, booruPostsClient, BooruUnavailable, MAX_BATCH, TTL };

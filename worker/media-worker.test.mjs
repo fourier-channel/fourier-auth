@@ -269,10 +269,12 @@ test("F-G2: a gate that withholds the URL from this Worker is a 502, named as wi
   assert.deepEqual(await resolveUpstream(fake, "u", { cookie: "a=b" }, { secret: "wrong" }), { ok: false, status: 502, withheld: true });
 });
 
-test("F-G1: a booru allow lives 60 s at the edge, a Matrix allow 240 s", () => {
+// 150 s for Matrix media (2026-10-12): with fourier-auth's 30 s quarantine
+// poll, a just-flagged or just-jailed Matrix image stops within jail's ~3 min.
+test("F-G1: a booru allow lives 60 s at the edge, a Matrix allow 150 s", () => {
   assert.equal(decisionTtl("booru"), 60);
-  assert.equal(decisionTtl("download"), 240);
-  assert.equal(decisionTtl("thumbnail"), 240);
+  assert.equal(decisionTtl("download"), 150);
+  assert.equal(decisionTtl("thumbnail"), 150);
 });
 
 // The whole fetch handler, with Cloudflare's globals faked: what the GATE is

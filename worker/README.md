@@ -1,3 +1,4 @@
+<!-- phase:S-8bb88f -->
 <!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-auth/worker/README.md
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
@@ -39,10 +40,12 @@ of. Only the decision crosses 41chan (a few hundred bytes); the image does not.
 Bytes are edge-cached keyed on the R2 object, and the cached copy is marked
 public-immutable in Cloudflare's shared cache: two authorized readers share
 one copy, and an unauthorized one never reaches the line that serves it.
-**Allows are cached at the edge** -- 240 seconds for Matrix media (operator
-ruling 2026-08-16), 60 seconds for booru media -- keyed on a hash of the
-credential plus the authorization URL; denials are never cached. A user who
-leaves a room can read for at most four more minutes. A booru post jailed or
+**Allows are cached at the edge** -- 150 seconds for Matrix media (the
+2026-08-16 ruling set 240; lowered 2026-10-12 so a flagged or jailed Matrix
+image stops within about three minutes), 60 seconds for booru media -- keyed
+on a hash of the credential plus the authorization URL; denials are never
+cached. A user who leaves a room can read for at most two and a half more
+minutes. A booru post jailed or
 deleted after a reader's allow was cached keeps serving that reader for at
 most the 60 s here plus the gate's 120 s visibility cache: about three
 minutes. The edge byte cache does not extend that, because it is reached
