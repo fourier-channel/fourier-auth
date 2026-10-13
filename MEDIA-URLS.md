@@ -109,9 +109,12 @@ Three were recorded on 2026-08-15. Their state on 2026-10-13, measured
 read-only on the production box:
 
 1. **Media at rest on Synapse's disk -- RESOLVED.** Then 2.3 GB / 6,118 files
-   in `/data/media_store`. Now under 1 MB: `local_content` and
-   `local_thumbnails` hold no files, and `remote_content` holds 74 files from
-   matrix.org that R2 does not have. Uploads are still written to disk and to
+   in `/data/media_store`. Now EMPTY: no files in `local_content`,
+   `local_thumbnails` or `remote_content`. The last 74 were empty (0-byte)
+   placeholders unknown to Synapse's database -- 67 from matrix.org created
+   2026-07-15, 7 from other servers created 2026-05-27 -- and were moved aside
+   on 2026-10-13 to /var/lib/fourier/junk/2026-10-13-synapse-empty-remote-
+   matrix-org/ (README there). Uploads are still written to disk and to
    R2 (`store_local: true`, `store_synchronous: true`), and
    `synapse-media-purge.timer` runs `/opt/synapse/tools/media-r2-purge
    --purge --min-age-days 1` daily: it frees a local file only after seeing
