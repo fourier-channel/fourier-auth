@@ -55,4 +55,23 @@ function sendRelease(req, res, signedUrl, { edge }) {
   return res.json({ url: signedUrl });
 }
 
-module.exports = { originalRelease, sendRelease };
+// THE ONE RELEASE MODE. MEDIA_ORIGINAL_RELEASE once also took "proxy" --
+// stream an authorized original through this host for a clean URL. The
+// streaming code went with the operator's 2026-08-15 ruling ("There is no
+// intended fallback. None."), but the switch stayed, and setting it made every
+// native original load answer 404 instead: a fallback that only hid a bug.
+// Removed 2026-10-13 (operator: "There should be no fallback"). Unset or
+// "redirect" is the mode; anything else is a configuration that asks for
+// something this service no longer does, and it refuses to start, naming the
+// fix, rather than serving quietly broken images.
+function releaseModeFromEnv(env = process.env) {
+  const raw = env.MEDIA_ORIGINAL_RELEASE;
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "redirect") return "redirect";
+  throw new Error(
+    `MEDIA_ORIGINAL_RELEASE=${JSON.stringify(raw)} is not a release mode: "redirect" is the only one ` +
+    "(the \"proxy\" mode was removed 2026-10-13). Remove the variable from this service's environment."
+  );
+}
+
+module.exports = { originalRelease, sendRelease, releaseModeFromEnv };

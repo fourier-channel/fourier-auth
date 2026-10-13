@@ -26,9 +26,10 @@ better caching control and simpler code. It is still wrong here.
 | either route, any caller without `MEDIA_EDGE_SECRET` | the decision, no URL (`released: false`) |
 | anything a browser renders as an image | must not stream through this host |
 
-`MEDIA_ORIGINAL_RELEASE` defaults to `redirect` for this reason and must stay
-there on 41chan. `proxy` exists for a deployment where the constraint does not
-apply.
+There is one release mode, `redirect`. `MEDIA_ORIGINAL_RELEASE` once also
+took `proxy` (stream through this host); that mode was removed 2026-10-13, and
+any value but unset or `redirect` now refuses to start (release.js,
+`releaseModeFromEnv`).
 
 ### Why the presigned URL is ugly, and why that is not the thing to fix
 

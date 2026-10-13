@@ -34,7 +34,7 @@ const { createSampleGate, parseSampleGateConfig } = require("./sample-gate");
 // closes the console -- never the service, which also gates every picture.
 const sampleGateConfig = parseSampleGateConfig(process.env);
 const sampleGate = createSampleGate({ config: sampleGateConfig, readRoom: queryRoomGateState });
-const { originalRelease, sendRelease } = require("./release");
+const { sendRelease, releaseModeFromEnv } = require("./release");
 const { isEdgeCaller, edgeClientIp, healthDetailAllowed } = require("./callers");
 const { createBooruVisibility, booruPostsClient } = require("./booru-visibility");
 const { makeBooruHandler } = require("./booru-route");
@@ -76,8 +76,8 @@ const COOKIE_OPTS = { httpOnly: true, sameSite: "lax", secure: true, domain: COO
 const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://booru.41chan.net/";
 
 // Local homeserver name as it appears in mxc URIs (the delegation host).
-// Only originals for THIS server are redirected to R2; remote-server media
-// falls through to the Synapse proxy (different key layout, small volume).
+// Local and remote media resolve to different R2 key layouts (mediar2.js);
+// what R2 does not hold is refused, never fetched from Synapse.
 const HOMESERVER_NAME = process.env.HOMESERVER_NAME || "41chan.net";
 
 // R2 (S3-compatible) config for presigned-URL redirects of local originals.
@@ -99,7 +99,8 @@ const s3 = r2Enabled ? new S3Client({
 }) : null;
 
 if (!r2Enabled) {
-  console.warn("[media] R2 not configured -- originals will proxy through Synapse");
+  console.error("[media] R2 NOT CONFIGURED -- every Matrix image is refused (404): there is no other source. " +
+    "Set R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY in this service's environment.");
 }
 
 // Key derivation for every media class lives in mediar2.js -- one copy, so
@@ -418,20 +419,16 @@ app.get("/verify", makeVerifyHandler({
 // whoami check against Synapse rather than a shortcut.
 const BOORU_MEDIA_REQUIRE_SESSION = (process.env.BOORU_MEDIA_REQUIRE_SESSION ?? "1") !== "0";
 
-// How an authorized local ORIGINAL reaches a native browser load.
-//   "redirect" 302 to a presigned R2 URL; no media byte touches this host (default)
-//   "proxy"    stream it through here; clean URL, but THIS HOST SERVES THE BYTES
-//
-// The default is not a performance choice. Operator ruling, restated
-// 2026-08-15: "41chan is not supposed to hold media or serve media outside of
-// site assets." The host does not permit adult content, and that applies to
-// bytes in transit through it, not only to bytes at rest on it. `proxy` exists
-// to be switchable for a deployment where that constraint does not apply; on
-// 41chan it must stay off.
-// Only affects native loads. cors fetch() callers keep the JSON envelope in
-// both modes -- see release.js for why that is not negotiable.
-const ORIGINAL_RELEASE_MODE =
-  (process.env.MEDIA_ORIGINAL_RELEASE || "redirect").toLowerCase() === "proxy" ? "proxy" : "redirect";
+// How an authorized ORIGINAL reaches the caller: a presigned R2 URL, handed
+// only to the edge Worker (release.js sendRelease), and no media byte touches
+// this host. Operator ruling, restated 2026-08-15: "41chan is not supposed to
+// hold media or serve media outside of site assets." The host does not
+// permit adult content, and that applies to bytes in transit through it, not
+// only to bytes at rest on it. There is no second mode (release.js,
+// releaseModeFromEnv). cors fetch() callers get the JSON envelope, native
+// loads the redirect -- see release.js for why that is not negotiable.
+// Throws at boot on any value but unset or "redirect" (release.js says why).
+releaseModeFromEnv();
 
 // Is this md5 some Matrix image's one file (canon.js's index/md5)? Cached: an
 // md5 that is one stays one.
@@ -659,9 +656,9 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // rendition is immutable once written.
   //
   // resolveR2Key returning null means R2 genuinely does not hold it, and the
-  // streaming fallback below is then correct rather than a failure.
-  if (r2Enabled
-      && !(ORIGINAL_RELEASE_MODE === "proxy" && originalRelease(req.headers) === "redirect")) {
+  // 404 below is then the answer, not a failure.
+  let refusal = null;
+  if (r2Enabled) {
     try {
       const key = await resolveR2Key(s3, R2_BUCKET, {
         serverName,
@@ -698,14 +695,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
         res.set("Retry-After", "2");
         return res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
       }
-      // Presign failure -> fall through to the Synapse proxy below rather than
-      // failing the request. Authorization already succeeded; this is a
-      // delivery-path fallback, not an authz bypass.
-      // Not an error path in the usual sense: R2 not holding an object is a
-      // real and expected state (74 zero-byte failed federation fetches, plus
-      // anything mid-upload). Falling through streams it, which is worse for
-      // the ruling but better than a broken image.
-      console.error(`[media] R2 release unavailable for ${serverName}/${mediaId}, proxying:`, err.message);
+      // R2 could not answer: it does not hold the object (a remote user's
+      // avatar from before federation was switched off, an upload still in
+      // flight), or the presign failed. Either way the answer is the 404
+      // below -- there is no other source. The reason rides on that one line.
+      refusal = err.message;
     }
   }
 
@@ -718,7 +712,12 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // of those was media bytes crossing this host, and worse, it meant a request
   // this gate had ALREADY AUTHORIZED could still be served from somewhere else,
   // so the gate's answer was never the last word. It is now.
-  console.error(`[media] no R2 object for ${serverName}/${mediaId}`);
+  //
+  // ONE line per refused request, saying REFUSED (2026-10-13). The catch above
+  // used to log "R2 release unavailable ... proxying" before this line, from
+  // the days a proxy followed it; a re-check read that as media streaming
+  // through this host when nothing was.
+  console.error(`[media] refused ${serverName}/${mediaId}: not in object storage${refusal ? ` (${refusal})` : ""}`);
   return res.status(404).json({ errcode: "M_NOT_FOUND", error: "media not in object storage" });
 });
 

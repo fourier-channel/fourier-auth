@@ -1,57 +1,37 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert");
-const { originalRelease } = require("./release");
+const { originalRelease, releaseModeFromEnv } = require("./release");
 
-// Which release path a request takes, as a pure decision, so the branch in
-// index.js can be reasoned about without standing up Synapse and R2.
-//
-// The rule under test: in "proxy" mode a NATIVE load is streamed (clean URL);
-// a cors fetch() still gets the JSON envelope. That second half is not a
-// preference -- a fetch that follows a cross-origin 302 has its Origin tainted
-// to "null" and R2's CORS allow-list cannot match it, so Technetium's original
-// path breaks if it is ever redirected. See release.js.
-function takesRedirectBranch(mode, headers) {
-  return !(mode === "proxy" && originalRelease(headers) === "redirect");
-}
+// THE ONE RELEASE MODE (2026-10-13). MEDIA_ORIGINAL_RELEASE used to accept
+// "proxy" -- stream originals through this host. The streaming code was
+// removed on the 2026-08-15 ruling and the switch was left behind, where
+// setting it made every native original load 404. The operator: "There should
+// be no fallback." This file used to test a copy of the old branch predicate
+// written inside the test itself (defaulting to "proxy", unlike index.js), so
+// it proved nothing about the service; it now tests the function index.js
+// calls at boot.
 
-const IMG = { "sec-fetch-dest": "image", "sec-fetch-mode": "no-cors" };
-const NAV = { "sec-fetch-mode": "navigate" };
-const CORS_FETCH = { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" };
-const CURL = {};
-
-test("proxy mode: an <img> load is streamed, not redirected", () => {
-  assert.equal(takesRedirectBranch("proxy", IMG), false);
-  assert.equal(takesRedirectBranch("proxy", NAV), false);
+test("unset or redirect is the mode", () => {
+  assert.equal(releaseModeFromEnv({}), "redirect");
+  assert.equal(releaseModeFromEnv({ MEDIA_ORIGINAL_RELEASE: "" }), "redirect");
+  assert.equal(releaseModeFromEnv({ MEDIA_ORIGINAL_RELEASE: "redirect" }), "redirect");
+  assert.equal(releaseModeFromEnv({ MEDIA_ORIGINAL_RELEASE: " REDIRECT " }), "redirect");
 });
 
-test("proxy mode: a cors fetch STILL gets the JSON envelope", () => {
-  // The safety invariant. If this ever flips, Technetium's originals go blank
-  // with a 200 and a CORS error, which is a maddening thing to debug.
-  assert.equal(originalRelease(CORS_FETCH), "json");
-  assert.equal(takesRedirectBranch("proxy", CORS_FETCH), true);
-});
-
-test("proxy mode: non-browser callers keep the JSON envelope", () => {
-  assert.equal(originalRelease(CURL), "json");
-  assert.equal(takesRedirectBranch("proxy", CURL), true);
-});
-
-test("redirect mode restores the old behaviour exactly", () => {
-  for (const h of [IMG, NAV, CORS_FETCH, CURL]) {
-    assert.equal(takesRedirectBranch("redirect", h), true,
-      "redirect mode must reach the presign branch for every caller");
+test("proxy, or anything else, refuses to start and names the fix", () => {
+  for (const v of ["proxy", "PROXY", "yes", "1", "stream"]) {
+    assert.throws(() => releaseModeFromEnv({ MEDIA_ORIGINAL_RELEASE: v }),
+      /not a release mode.*Remove the variable/, `MEDIA_ORIGINAL_RELEASE=${v}`);
   }
 });
 
-test("the mode parser defaults to proxy and only accepts the one opt-out", () => {
-  const parse = (v) => (String(v || "proxy").toLowerCase() === "redirect" ? "redirect" : "proxy");
-  assert.equal(parse(undefined), "proxy");
-  assert.equal(parse(""), "proxy");
-  assert.equal(parse("REDIRECT"), "redirect");
-  assert.equal(parse("redirect"), "redirect");
-  // Anything unrecognised must fail toward the safe URL, not toward the
-  // credential-bearing one.
-  assert.equal(parse("yes"), "proxy");
-  assert.equal(parse("1"), "proxy");
+// Kept from the old file, because it is the one invariant here with teeth:
+// a fetch() that follows a cross-origin 302 has its Origin tainted to "null"
+// and R2's CORS allow-list cannot match it, so Technetium's originals break
+// if a cors fetch is ever redirected. See release.js.
+test("a cors fetch, and a non-browser caller, get the JSON envelope; a native load the redirect", () => {
+  assert.equal(originalRelease({ "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" }), "json");
+  assert.equal(originalRelease({}), "json");
+  assert.equal(originalRelease({ "sec-fetch-dest": "image", "sec-fetch-mode": "no-cors" }), "redirect");
 });

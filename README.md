@@ -151,8 +151,9 @@ through `POST /exchange`. Adding an origin here is a session-issuance grant,
 not a CORS tweak. Empty means no cross-origin clients.
 
 `BOORU_MEDIA_REQUIRE_SESSION` (booru-native route needs a session, never a
-Bearer) and `MEDIA_ORIGINAL_RELEASE` (leave at the default; `proxy` is an
-escape hatch that must stay off here).
+Bearer). `MEDIA_ORIGINAL_RELEASE` is unset or `redirect`; any other value
+refuses to start -- the `proxy` mode was removed 2026-10-13 (operator: "There
+should be no fallback").
 
 `BOORU_INTERNAL_URL` (default `http://danbooru:3000`): the booru's Rails app
 on the docker network. `/booru/<md5>` serves an original or a variant only
