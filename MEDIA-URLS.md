@@ -127,6 +127,14 @@ read-only on the production box:
    (worker/wrangler.toml), asks this gate, and streams from R2, so the bytes
    no longer cross the homeserver on that path. Read from config, not from
    traffic.
-3. **fourier-auth streaming thumbnails and remote originals -- NOT
-   RE-CHECKED.** Recorded then as 3,724 thumbnail requests in 24h through this
-   service. Still open until measured again.
+3. **fourier-auth streaming thumbnails and remote originals -- NEARLY
+   RESOLVED, measured 2026-10-13.** Recorded then as 3,724 thumbnail requests
+   in 24h through this service. Thumbnails now resolve to their R2 rendition
+   (mediar2.js lists the object's thumbnail prefix) and only the edge Worker is
+   handed the URL. What still streams is the deliberate fallback for media R2
+   does not hold ("[media] R2 release unavailable ... proxying" in this
+   service's log): 37 requests in the last 24h, 78 in the container's 3 days
+   of logs -- all for TWO remote items Synapse has rows for but neither its
+   disk nor R2 holds (cutefunny.art, ~1 MB; matrix.org, ~750 KB), re-requested
+   over and over. Open: get those into R2, or find why a re-fetch of remote
+   media does not land there under the key this service resolves.
