@@ -1,3 +1,4 @@
+<!-- phase:S-736f6e -->
 <!-- coherence:hydrated -- canon is fourier-basis/docs/repos/fourier-auth/MEDIA-URLS.md
      Edit canon and run `coherence hydrate`, never this delivered copy.
      An edit here is drift: hydration will refuse to overwrite it and the
@@ -102,24 +103,27 @@ shape as the booru route. Caddy answers that path on the sample host with a
 404 that names the missing route, so a Worker without it shows as a fault, not
 as the origin serving bytes.
 
-## Known violations still open (2026-08-15)
+## Known violations (re-checked 2026-10-13)
 
-Found while reverting an accidental fourth one. None were introduced by that
-change; all predate it.
+Three were recorded on 2026-08-15. Their state on 2026-10-13, measured
+read-only on the production box:
 
-1. **Synapse holds 2.3 GB / 6,118 files of media at rest** in
-   `/data/media_store` on local disk. `store_local: true` writes every upload to
-   both disk and R2, and nothing ever removes the local copy -- `s3_media_upload`
-   ships in the container but no cron or timer runs it. This is the direct
-   "hold media" violation and it grows with every upload.
-2. **Synapse serves those bytes** to every Element client on
-   `matrix.41chan.net/_matrix/client/v1/media/*`. Emptying the local store does
-   not fix this on its own: Synapse would fetch from R2 and still stream through
-   this host.
-3. **fourier-auth streams thumbnails and remote originals**: 3,724 thumbnail
-   requests in 24h, measured from the booru's own nginx. The thumbnails already
-   exist in R2 under `local_thumbnails/` (3,766 objects), so this path could be
-   redirected the same way originals are.
-
-Ordered by value: (1) is a deletion and needs an operator decision; (3) is a
-contained change in this service; (2) is the one that actually needs the Worker.
+1. **Media at rest on Synapse's disk -- RESOLVED.** Then 2.3 GB / 6,118 files
+   in `/data/media_store`. Now under 1 MB: `local_content` and
+   `local_thumbnails` hold no files, and `remote_content` holds 74 files from
+   matrix.org that R2 does not have. Uploads are still written to disk and to
+   R2 (`store_local: true`, `store_synchronous: true`), and
+   `synapse-media-purge.timer` runs `/opt/synapse/tools/media-r2-purge
+   --purge --min-age-days 1` daily: it frees a local file only after seeing
+   it in a live R2 listing, and keeps anything unconfirmed. Recent runs freed
+   about 18 files a day. Synapse's database still lists 1,128 local media
+   (2.19 GB, all in R2) and 258 remote-cache rows (185 MB, none newer than
+   2026-07-27). Not verified: that every one of those rows has an R2 object.
+2. **Synapse serving media to clients -- RESOLVED for this route.** The edge
+   Worker owns `matrix.41chan.net/_matrix/client/v1/media/*`
+   (worker/wrangler.toml), asks this gate, and streams from R2, so the bytes
+   no longer cross the homeserver on that path. Read from config, not from
+   traffic.
+3. **fourier-auth streaming thumbnails and remote originals -- NOT
+   RE-CHECKED.** Recorded then as 3,724 thumbnail requests in 24h through this
+   service. Still open until measured again.
