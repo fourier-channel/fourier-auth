@@ -23,7 +23,10 @@ SQL="$HERE/db/synapse-indexes.sql"
 # anywhere also matched the file's own comment ("IF NOT EXISTS makes
 # re-running a no-op") and reported an index called 'makes' as MISSING --
 # the check failing closed on its first run, correctly, for the wrong reason.
-names=$(grep -oE '^CREATE INDEX CONCURRENTLY IF NOT EXISTS [a-z_]+' "$SQL" | awk '{print $NF}')
+# Digits included: events_gate3_placement_idx read as [a-z_]+ is
+# "events_gate", an index that never exists -- MISSING on every run, for a
+# name the file never declared (the same class as 'makes' above).
+names=$(grep -oE '^CREATE INDEX CONCURRENTLY IF NOT EXISTS [a-z_][a-z0-9_]*' "$SQL" | awk '{print $NF}')
 [ -n "$names" ] || { echo "no CREATE INDEX statements found in $SQL"; exit 2; }
 
 if [ "${1:-}" != "--check" ]; then
@@ -49,7 +52,7 @@ echo "synapse indexes: all present and valid"
 # would see them, with has_table_privilege, not by reading the file back.
 GRANTS="$HERE/db/synapse-grants.sql"
 RO_ROLE="${RO_ROLE:-fourier_auth_ro}"
-tables=$(grep -oE '^GRANT SELECT ON [a-z_]+' "$GRANTS" | awk '{print $NF}')
+tables=$(grep -oE '^GRANT SELECT ON [a-z_][a-z0-9_]*' "$GRANTS" | awk '{print $NF}')
 [ -n "$tables" ] || { echo "no GRANT statements found in $GRANTS"; exit 2; }
 if [ "${1:-}" != "--check" ]; then
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q < "$GRANTS"

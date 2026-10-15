@@ -35,7 +35,11 @@ Bridge) and technetium.
    whether the user is joined, whether it is a site asset (avatar, room icon,
    emoji pack) that only needs a valid token. A reference to an mxc counts
    only when the image's uploader made it, or, for a message, when its sender
-   has been in a room the uploader posted it to (a forward). Synapse's HTTP
+   has been in a room the uploader posted it to (a forward) -- and never once
+   the message that made it has been redacted (operator ruling 2026-10-15:
+   deleting a message hides its image at once -- at once for a fresh answer;
+   an answer already cached is cleared within one poll by the gate 3 reader
+   when it is on, and with it off lives out its 6 h cache entry). Synapse's HTTP
    API is used only for `whoami` and `joined_rooms`. Synapse's
    authenticated-media endpoint is NOT used, because it authenticates the
    token but does not enforce room membership. Booru media asks a different
@@ -87,9 +91,9 @@ early July and the later changes are documented in code headers and in
 
 - A Synapse homeserver, with a **read-only Postgres role on Synapse's own
   database**. The service reads `profiles`, `events`, `event_json`,
-  `current_state_events`, `local_media_repository` and `room_memberships`
-  directly. It needs the four indexes in `db/synapse-indexes.sql` and the
-  two grants in `db/synapse-grants.sql`; `tools/ensure-synapse-indexes.sh`
+  `current_state_events`, `local_media_repository`, `room_memberships` and
+  `redactions` directly. It needs the six indexes in `db/synapse-indexes.sql`
+  and the three grants in `db/synapse-grants.sql`; `tools/ensure-synapse-indexes.sh`
   applies and verifies both. Without the indexes every check is a sequential
   scan and the pool drains into 503s; without the grants every Matrix media
   decision fails with 503. The service checks both at boot, logs loudly if
@@ -212,6 +216,55 @@ rooms). Read from Synapse's database on the pool
 above, cached 15 s. Unset or malformed, the console answers 503 to everyone
 and boot and `/healthz` say why; the rest of the service is unaffected.
 
+`GATE3_READER`, `BOORU_PLACEMENTS_LOGIN`, `BOORU_PLACEMENTS_API_KEY`,
+`GATE3_SWEEP_LAP_HOURS`: gate 3 for posts, the placements reader
+(`placements-reader.js`; fourier-basis `docs/design/GATE3_CONTRACTS.md` A2).
+A Matrix post on the booru is visible to exactly the viewers its image is
+visible to, so for every image a Synapse event touches -- an image message,
+a sticker, a room avatar, a redaction -- the reader pushes this service's own
+answer for that image (site asset or not, its uploader and its rooms, from
+the image gate's own queries, uncached) to the booru's
+`POST /fourier_jail/release.json {"placements": ...}`, as the booru account
+`gate` with Basic auth. The booru keeps the cursors; the reader asks for them
+at start (`GET /fourier_jail/release.json?placements=cursor`). A live cursor
+follows Synapse's head (2 s polls once caught up, re-reading the 500 ids
+below it for late commits); a sweep cursor walks all of history, backfill
+(negative orderings) included, one lap per `GATE3_SWEEP_LAP_HOURS` (default
+24); lap 1 is the backfill. Pages are one repeatable-read snapshot each, on
+the reader's own two-connection pool (5 s statement timeout), bounded at
+50,000 ids, 2,000 rows, 500 images or 20,000 room entries. `GATE3_READER` is
+`on` or `off` (unset is off); any other value keeps it off and turns its
+`/healthz` check red. On, it needs `BOORU_PLACEMENTS_LOGIN` and
+`BOORU_PLACEMENTS_API_KEY` (gitignored `.env`, the key entered with
+`read -s`): the `gate` account and a key of it permitted `fourier_jail:create`
+and `fourier_jail:index` -- a separate key from the quarantine reader's,
+which is scoped to `fourier_jail:index` only. Before switching it on, run
+`tools/ensure-synapse-indexes.sh` (`events_gate3_placement_idx`,
+`profiles_avatar_url_idx`, and SELECT on `redactions`). Failures: Synapse
+unreadable, or the booru answering 5xx, 408, 429 or not at all, back off 5 s
+doubling to 5 min with the cursor unmoved; any other booru 4xx, or an answer
+that is not the contract's, stops the reader until a restart with its lamp
+red and the fix named; an event whose row cannot be read is bisected down to
+itself and pushed in `skipped`, as is (after one more ask) an image whose
+answer hits the 5 s statement timeout -- more than three of those in one
+page is the database's fault and abandons the page. A sweep page that
+cannot be read backs off the sweep alone; the live poll carries on.
+The `gate3-reader` check on `/healthz` is red when the lag passes 5
+minutes, no cycle has completed for 5 minutes, or the reader has stopped;
+amber while any event has been skipped (counted per distinct event, with
+redactions named apart), while the booru's cursor in a push answer is not
+the page's end, for 5 minutes after the booru answers `stale`, while the
+booru's live cursor is ahead of Synapse's head, and while the sweep is
+retrying. Public callers get the level, a fixed phrase and the skipped
+counts; the live cursor, Synapse's head, the lag in ids and in seconds (how
+long the oldest unread event has waited), the newest placement pushed, the
+sweep's position and lap and the last push go only to a caller with detail
+access (this machine or the tailnet, through no proxy; leak audit F-G5),
+since sampled twice they say when images are posted, private rooms
+included. With `GATE3_READER` off nothing clears the image gate's cache on
+a redaction: an image whose rooms were cached before its message was
+deleted stays readable to those rooms' members for up to 6 h.
+
 `MEDIA_EDGE_SECRET`: the shared secret the Cloudflare Worker sends in
 `X-Fourier-Edge`. Presigned R2 URLs are released only to a request carrying
 it; every other caller of either media route gets the decision as
@@ -274,6 +327,18 @@ times when a module was added.
   Does not refresh the session's Matrix token. The proxy forwards with
   `forward_auth ... uri /verify?gate=sample` and `copy_headers X-Fourier-View
   X-Fourier-Identity`, and must strip client-supplied copies of both.
+- `GET /verify?gate=rooms` -- gate 3 for posts (`rooms-gate.js`;
+  `GATE3_CONTRACTS.md` A1): the rooms the session cookie's OWN Matrix user is
+  joined to now, from Synapse's `current_state_events` (never
+  `room_memberships`, which is history). Nothing in the request names a
+  user; the booru forwards the viewer's cookie and calls
+  `http://fourier-auth:8010/verify?gate=rooms` on its docker network.
+  `200 {"mxid","rooms":[sorted],"count","digest","as_of"}` (`digest` is the
+  sha256 hex of the rooms joined by newline), `401 {"error","fix"}` with no
+  verified identity, `503 {"error","fix"}` when the session store or
+  Synapse's database cannot be read; always JSON and `Cache-Control:
+  no-store`. Cached 10 s in Redis (`viewerrooms1:<mxid>`), only when
+  non-empty, one query per viewer at a time.
 - `GET /media/<server>/<mediaId>` (and `OPTIONS`) -- the decision plus a 302
   to a presigned URL or a `{url}` envelope. `?w=`/`?h=` snap to an allowed
   size (180, 320, 360, 720, 850); legacy `?thumb=1` means 320. Answers 403

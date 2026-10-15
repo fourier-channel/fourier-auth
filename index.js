@@ -7,7 +7,7 @@ const { makeTokenSource } = require("./tokenRefresh");
 const { GateSignals } = require("./gateSignals");
 const signals = new GateSignals();
 const { createSession, saveSession, getSession, destroySession, redisPing,
-        putOidcState, takeOidcState, cacheGetJson, cacheSetJson, getPreviousSession, sessionTtlRemaining } = require("./session");
+        putOidcState, takeOidcState, cacheGetJson, cacheSetJson, cacheDel, getPreviousSession, sessionTtlRemaining } = require("./session");
 const { getProvider } = require("./providers");
 const tokenSource = makeTokenSource({
   getSession,
@@ -19,7 +19,7 @@ const tokenSource = makeTokenSource({
     error: (m) => { console.error(m); signals.refreshFailed(m.replace(/^\[session\] /, "")); },
   },
 });
-const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, verifySynapseGrants, whoamiUser, queryRoomGateState } = require("./mediaauth");
+const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, verifySynapseGrants, whoamiUser, queryRoomGateState, queryJoinedRoomsOf } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // Wiring, asserted at boot: the first deploy of /exchange answered every
 // request 503 "whoamiUser is not a function" because the helper had been
@@ -27,6 +27,7 @@ const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // A missing export is a boot failure here, not a 503 for verification to find.
 if (typeof whoamiUser !== "function") throw new Error("mediaauth must export whoamiUser");
 if (typeof queryRoomGateState !== "function") throw new Error("mediaauth must export queryRoomGateState");
+if (typeof queryJoinedRoomsOf !== "function") throw new Error("mediaauth must export queryJoinedRoomsOf");
 const { makeVerifyHandler } = require("./verify");
 const { createSampleGate, parseSampleGateConfig } = require("./sample-gate");
 // The sampling console's door (operator ruling 2026-10-09; sample-gate.js).
@@ -34,6 +35,9 @@ const { createSampleGate, parseSampleGateConfig } = require("./sample-gate");
 // closes the console -- never the service, which also gates every picture.
 const sampleGateConfig = parseSampleGateConfig(process.env);
 const sampleGate = createSampleGate({ config: sampleGateConfig, readRoom: queryRoomGateState });
+// A viewer's rooms, for the booru's gate 3 for posts (GATE3_CONTRACTS.md A1;
+// rooms-gate.js): GET /verify?gate=rooms, answered for the session's own MXID.
+const { createRoomsGate } = require("./rooms-gate");
 const { sendRelease, releaseModeFromEnv } = require("./release");
 const { isEdgeCaller, edgeClientIp, healthDetailAllowed } = require("./callers");
 const { createBooruVisibility, booruPostsClient } = require("./booru-visibility");
@@ -171,6 +175,31 @@ const quarantine = createQuarantine({
   problem: quarantineConfigProblem({ login: BOORU_QUARANTINE_LOGIN, apiKey: BOORU_QUARANTINE_API_KEY }),
 }).start();
 
+const roomsGate = createRoomsGate({ readJoinedRooms: queryJoinedRoomsOf, cacheGet: cacheGetJson, cacheSet: cacheSetJson });
+
+// GATE 3 FOR POSTS -- the placements reader (GATE3_CONTRACTS.md A2;
+// placements-reader.js). Off unless GATE3_READER=on, which waits on the
+// booru's receiving mode (D) and on tools/ensure-synapse-indexes.sh having
+// built events_gate3_placement_idx and granted SELECT on redactions. It reads
+// Synapse on its OWN two-connection pool and pushes, as the booru's gate
+// account, to the booru's existing /fourier_jail/release.json (ruling
+// 2026-09-24: no new routes). A bad config keeps it off and red, never on.
+const { createPlacementsReader, placementsBooruClient, parseReaderConfig, readerPool, snapshotRunner, readerOffHealth } = require("./placements-reader");
+const { mediaFactKeys } = require("./mediaauth-core");
+const gate3Config = parseReaderConfig(process.env);
+const placementsReader = gate3Config.on && !gate3Config.problem
+  ? createPlacementsReader({
+      withSnapshot: snapshotRunner(readerPool(process.env), { homeserverName: HOMESERVER_NAME }),
+      booru: placementsBooruClient({ axios, baseUrl: BOORU_INTERNAL_URL, login: gate3Config.login, apiKey: gate3Config.apiKey }),
+      homeserverName: HOMESERVER_NAME,
+      // A redaction hides its image at once (ruled 2026-10-15): forget what
+      // the image gate cached about every image a live event touched.
+      onLiveAnswers: (mxcs) => cacheDel(...mxcs.flatMap(mediaFactKeys)),
+      options: { lapHours: gate3Config.lapHours },
+    }).start()
+  : null;
+if (gate3Config.problem) console.error(`[gate3-reader] NOT RUNNING -- ${gate3Config.problem}`);
+
 // What the boot-time schema check found, for /healthz. null until it has run.
 let schemaReport = null;
 
@@ -249,6 +278,7 @@ app.get("/healthz", async (req, res) => {
         : q.level === "red" ? "unreadable: the Matrix door answers 503 and publication grants are refused; see the service log"
         : "the last read failed; the last good document is still inside its bound",
     },
+    placementsReader ? placementsReader.health({ detail }) : readerOffHealth(gate3Config),
     ...gate.checks,
   ];
   const level = checks.some((c) => c.level === "red") ? "red"
@@ -361,7 +391,9 @@ app.get("/verify", makeVerifyHandler({
   getSession,
   cookieName: COOKIE_NAME,
   // GET /verify?gate=sample: the sampling console's door (sample-gate.js).
-  gates: { sample: sampleGate.answer },
+  // GET /verify?gate=rooms: the viewer's joined rooms, as JSON, for the
+  // booru's gate 3 for posts (rooms-gate.js). Its session-store 503 is JSON too.
+  gates: { sample: sampleGate.answer, rooms: roomsGate },
   // The session bar's evidence: real expiry from Redis PTTL (there is no
   // refresh -- sessions live a fixed TTL, so no refresh_at is published and
   // none is invented) plus the user's previous session, recorded at logout.

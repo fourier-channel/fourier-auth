@@ -136,6 +136,12 @@ async function cacheSetJson(key, value, ttlSeconds) {
   await redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
 }
 
+// Drop cached keys, for the gate 3 reader: a redacted placement must stop
+// counting at once, not when a six-hour entry expires (mediaauth-core.js).
+async function cacheDel(...keys) {
+  if (keys.length) await redis.del(...keys);
+}
+
 // Short-lived storage for in-flight OIDC login state (PKCE verifier + CSRF
 // state), keyed by the random state value. Separate from sessions; 10-min TTL.
 const OIDC_PREFIX = "oidc:";
@@ -150,4 +156,4 @@ async function takeOidcState(state) {
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
 
-module.exports = { createSession, saveSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson, sessionDigest, notePreviousSession, getPreviousSession, sessionTtlRemaining };
+module.exports = { createSession, saveSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson, cacheDel, sessionDigest, notePreviousSession, getPreviousSession, sessionTtlRemaining };

@@ -18,14 +18,26 @@
 
 // These lifetimes bound how long an ALLOW can outlive the facts behind it.
 // They never make a denial: a no from the cache is re-asked of the source
-// before it is given (see checkMediaAccess), because every one of these lists
-// GROWS -- a user joins rooms, an image is posted again elsewhere, a room turns
+// before it is given (see decideMediaAccess), because these lists GROW -- a
+// user joins rooms, an image is posted again elsewhere, a room turns
 // encryption on -- and a list read before it grew says no to things that are
-// now yes.
+// now yes. Since 2026-10-15 an image's own lists also SHRINK: a redacted
+// placement stops counting (operator ruling: deleting a message hides its
+// image at once), and a list read before it shrank says yes to what is now
+// no. That stale allow is exactly what these lifetimes bound; the gate 3
+// reader, when on, cuts it to one poll (mediaRooms below).
 const TTL = {
   // An mxc does not change what it IS; long.
   siteAsset: 6 * 60 * 60,
-  // The rooms containing an mxc only grow (a repost, a forward); long.
+  // The rooms containing an mxc grow (a repost, a forward) -- and, since
+  // 2026-10-15, SHRINK when a placement is redacted (operator ruling: deleting
+  // a message hides its image at once). A list cached before a redaction
+  // would allow for up to this long, so the gate 3 reader, when it runs,
+  // forgets the cached facts of every image a live event touches
+  // (mediaFactKeys; placements-reader.js onLiveAnswers). With the reader OFF
+  // nothing clears them, and a deleted message's image stays readable to its
+  // rooms' members for up to this long (README, GATE3_READER). Long, for the
+  // thumbnail walls this cache exists for.
   mediaRooms: 6 * 60 * 60,
   // Membership changes; this is the security-sensitive window where a
   // just-removed user could still fetch. Short.
@@ -37,6 +49,14 @@ const TTL = {
   // cached, since a no can become a yes.
   uploaderJoined: 6 * 60 * 60,
 };
+
+// Where the facts about one image are cached (see the key versions in
+// createMediaAuth). mediaFactKeys(mxc) is every key a change to that image's
+// placements must clear -- the gate 3 reader's way to make a redaction count
+// at once rather than when the cache expires.
+const SITE_ASSET_KEY = "siteasset3:";
+const MEDIA_ROOMS_KEY = "mediarooms3:";
+const mediaFactKeys = (mxc) => [SITE_ASSET_KEY + mxc, MEDIA_ROOMS_KEY + mxc];
 
 // The gate could not be consulted. Distinct from a denial on purpose: the
 // route answers 503 (the edge turns that into an uncached 502 and the client
@@ -106,19 +126,21 @@ function createMediaAuth(deps, opts = {}) {
   // miss); room lists are stored raw and only when non-empty (an empty list
   // for a not-yet-synced image must not stick).
   //
-  // The site-asset and media-room keys carry a "2" since the uploader rule
-  // (leak audit F-G3, 2026-10-01): the old keys hold answers computed WITHOUT
-  // it, for six hours, and reading them would keep the hole open for that long
-  // after the deploy that closes it.
+  // The site-asset and media-room keys carry a version. "2" came with the
+  // uploader rule (leak audit F-G3, 2026-10-01): the old keys held answers
+  // computed WITHOUT it, for six hours, and reading them would have kept the
+  // hole open for that long after the deploy that closed it. "3" came with
+  // the redaction rule (gate 3 for posts, ruled 2026-10-15), for the same
+  // reason: a "2" answer counts a placement whose message was deleted.
   const getUploader = (serverName, mediaId) =>
     cached(`uploader:mxc://${serverName}/${mediaId}`, ttl.uploader,
       async () => ({ v: await deps.queryUploader(serverName, mediaId) }))
       .then((r) => r.v);
   const isSiteAsset = (mxc, uploader, serverName) =>
-    cached("siteasset2:" + mxc, ttl.siteAsset, async () => ({ v: await deps.queryIsSiteAsset(mxc, uploader, serverName) }))
+    cached(SITE_ASSET_KEY + mxc, ttl.siteAsset, async () => ({ v: await deps.queryIsSiteAsset(mxc, uploader, serverName) }))
       .then((r) => r.v);
   const resolveMediaRooms = (mxc, uploader) =>
-    cached("mediarooms2:" + mxc, ttl.mediaRooms, () => deps.queryMediaRooms(mxc, uploader), (rooms) => rooms.length > 0);
+    cached(MEDIA_ROOMS_KEY + mxc, ttl.mediaRooms, () => deps.queryMediaRooms(mxc, uploader), (rooms) => rooms.length > 0);
   const uploaderJoined = (roomId, uploader) =>
     !uploader ? Promise.resolve(false)
       : cached(`uploaderin:${roomId}:${uploader}`, ttl.uploaderJoined,
@@ -181,7 +203,7 @@ function createMediaAuth(deps, opts = {}) {
   const freshMediaRooms = (mxc, uploader) =>
     coalesce("fresh:mediarooms:" + mxc, async () => {
       const rooms = await deps.queryMediaRooms(mxc, uploader);
-      if (rooms.length > 0) await deps.cacheSet("mediarooms2:" + mxc, rooms, ttl.mediaRooms).catch(() => {});
+      if (rooms.length > 0) await deps.cacheSet(MEDIA_ROOMS_KEY + mxc, rooms, ttl.mediaRooms).catch(() => {});
       return rooms;
     });
   const freshUploaderJoined = (roomId, uploader) =>
@@ -247,8 +269,12 @@ function createMediaAuth(deps, opts = {}) {
       ]);
       const cachedIn = (roomId) => uploaderJoined(roomId, uploader);
       if (await decideContent(mediaRooms, joinedRooms, opts2.roomId, isEncryptedRoom, cachedIn)) return { allowed: true };
-      // A NO FROM THE CACHE IS NOT A NO. Every cached list here only grows, so
-      // a stale one can only wrongly refuse. Reported 2026-09-25 as a new
+      // A NO FROM THE CACHE IS NOT A NO. A cached list goes stale both ways:
+      // it misses rooms gained since it was read (a join, a repost), which
+      // wrongly REFUSES -- re-asked here -- and, since redactions count
+      // (2026-10-15), it keeps rooms lost since, which wrongly ALLOWS -- that
+      // one is bounded by the TTLs at the top of this file and cleared by the
+      // gate 3 reader, never re-asked per request. Reported 2026-09-25 as a new
       // account whose images partly never loaded, and traced here: a new
       // account joins rooms in its first minutes, and the joined-rooms list
       // cached at its first image refused every image in the rooms it joined
@@ -302,4 +328,4 @@ function declaredGrantTables(sqlText) {
   return out;
 }
 
-module.exports = { createMediaAuth, MediaAuthUnavailable, TTL, declaredIndexNames, declaredGrantTables };
+module.exports = { createMediaAuth, MediaAuthUnavailable, TTL, declaredIndexNames, declaredGrantTables, mediaFactKeys };

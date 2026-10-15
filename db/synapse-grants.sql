@@ -17,7 +17,18 @@
 -- tools/ensure-synapse-indexes.sh applies and verifies it; the service checks
 -- the privileges at boot and reports them on /healthz.
 --
+-- Added 2026-10-15 for gate 3 for posts (fourier-basis
+-- docs/design/GATE3_CONTRACTS.md A2). Deleting a message hides its image at
+-- once (operator ruling 2026-10-15), so a placement whose message was redacted
+-- stops counting the moment the redaction is persisted:
+--
+--   redactions              which events have been redacted (redacts)
+--
+-- Without it the image gate's room and site-asset queries throw and every
+-- Matrix picture answers 503 -- apply it BEFORE the restart that ships them.
+--
 -- Idempotent: GRANT of a privilege already held is a no-op.
 
 GRANT SELECT ON local_media_repository TO fourier_auth_ro;
 GRANT SELECT ON room_memberships TO fourier_auth_ro;
+GRANT SELECT ON redactions TO fourier_auth_ro;

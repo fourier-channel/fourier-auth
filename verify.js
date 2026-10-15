@@ -71,12 +71,18 @@ function sendPage(res, out) {
 // asked on every request of a page that polls). Added for the sampling
 // console on sample.41chan.net (operator ruling 2026-10-09; sample-gate.js),
 // on this route because no new routes are added (ruling 2026-09-24).
+//
+// A gate is that function, or { answer, storeUnavailable }: storeUnavailable
+// (err) -> { status, headers, body } answers the session-store 503 in the
+// gate's own format. The rooms gate (rooms-gate.js, gate 3 for posts) is read
+// by the booru as JSON, and an HTML page there is a body it cannot parse.
 function makeVerifyHandler({ getSession, cookieName, sessionInfo, gates = {} }) {
   return async function verifyHandler(req, res) {
     const sid = req.cookies ? req.cookies[cookieName] : undefined;
     const gateName = req.query ? req.query.gate : undefined;
     if (gateName !== undefined) {
-      const gate = typeof gateName === "string" && Object.prototype.hasOwnProperty.call(gates, gateName) ? gates[gateName] : null;
+      const entry = typeof gateName === "string" && Object.prototype.hasOwnProperty.call(gates, gateName) ? gates[gateName] : null;
+      const gate = typeof entry === "function" ? entry : entry && typeof entry.answer === "function" ? entry.answer : null;
       if (!gate) {
         return sendPage(res, doorPage(400, `Unknown gate. This service knows: ${Object.keys(gates).join(", ") || "none"}. ` +
           "Fix the gate= parameter in the proxy's forward_auth uri."));
@@ -86,6 +92,7 @@ function makeVerifyHandler({ getSession, cookieName, sessionInfo, gates = {} }) 
         session = await getSession(sid);
       } catch (e) {
         console.error(`[verify] gate ${gateName}: session store unreadable: ${e.code || e.message}`);
+        if (entry && typeof entry.storeUnavailable === "function") return sendPage(res, entry.storeUnavailable(e));
         return sendPage(res, doorPage(503, "Closed: the session store could not be read, so who you are is unknown. " +
           "Check fourier-auth's /healthz (session store); retry in a minute.", { "Retry-After": "30" }));
       }

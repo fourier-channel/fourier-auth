@@ -124,13 +124,15 @@ test("empty room lists are not cached; site-asset booleans are cached wrapped", 
   const { deps, cache } = fakes({ queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!r:x"] });
   const auth = createMediaAuth(deps);
   await auth.checkMediaAccess("tok", "41chan.net", "m");
-  assert.equal(cache.has("mediarooms2:mxc://41chan.net/m"), false, "an empty resolution must not stick");
-  assert.deepEqual(cache.get("siteasset2:mxc://41chan.net/m"), { v: false });
+  assert.equal(cache.has("mediarooms3:mxc://41chan.net/m"), false, "an empty resolution must not stick");
+  assert.deepEqual(cache.get("siteasset3:mxc://41chan.net/m"), { v: false });
 });
 
-// A cached list only grows stale in one direction -- it misses rooms -- so a
-// refusal read from the cache is re-asked of the source. Reported 2026-09-25:
-// a new account's images partly never loaded.
+// A cached list that misses rooms gained since it was read refuses wrongly, so
+// a refusal read from the cache is re-asked of the source. Reported 2026-09-25:
+// a new account's images partly never loaded. (The other direction -- a
+// redaction shrinks the list, 2026-10-15 -- is a stale ALLOW, bounded by the
+// TTL and cleared by the gate 3 reader; it is never re-asked per request.)
 
 test("a room joined after the joined-rooms list was cached is not refused", async () => {
   let joined = ["!a:x"];
@@ -213,13 +215,37 @@ test("declaredIndexNames reads CREATE lines only, never comments", () => {
   assert.deepEqual(declaredIndexNames(sql), ["event_json_content_url_idx", "events_site_asset_types_idx"]);
 });
 
-test("the tracked SQL declares the four indexes the gate relies on", () => {
+test("the tracked SQL declares the indexes the gate and the gate 3 reader rely on", () => {
   const { declaredIndexNames } = require("./mediaauth-core");
   const fs = require("node:fs");
   const names = declaredIndexNames(fs.readFileSync(require.resolve("./db/synapse-indexes.sql"), "utf8"));
-  for (const n of ["event_json_content_url_idx", "event_json_content_avatar_url_idx", "event_json_content_thumbnail_url_idx", "events_site_asset_types_idx"]) {
+  for (const n of ["event_json_content_url_idx", "event_json_content_avatar_url_idx", "event_json_content_thumbnail_url_idx",
+    "events_site_asset_types_idx", "events_gate3_placement_idx", "profiles_avatar_url_idx"]) {
     assert.ok(names.includes(n), n);
   }
+});
+
+// The deploy script names the indexes it builds and verifies with its OWN
+// grep, not with declaredIndexNames. It read [a-z_]+ until 2026-10-15, which
+// turns events_gate3_placement_idx into "events_gate": an index that never
+// exists, MISSING on every deploy. Run the script's actual pattern, taken from
+// the script, against the tracked files and require the service's answer.
+test("ensure-synapse-indexes.sh reads the same index and grant names as the service", () => {
+  const { declaredIndexNames, declaredGrantTables } = require("./mediaauth-core");
+  const fs = require("node:fs");
+  const { execFileSync } = require("node:child_process");
+  const script = fs.readFileSync(require.resolve("./tools/ensure-synapse-indexes.sh"), "utf8");
+  const pattern = (lhs) => {
+    const m = script.match(new RegExp(`^${lhs}=\\$\\(grep -oE '([^']+)'`, "m"));
+    assert.ok(m, `the script's ${lhs}= grep line was not found`);
+    return m[1];
+  };
+  const run = (pat, file) => execFileSync("grep", ["-oE", pat, require.resolve(file)], { encoding: "utf8" })
+    .trim().split("\n").map((l) => l.split(/\s+/).pop());
+  const sqlIdx = fs.readFileSync(require.resolve("./db/synapse-indexes.sql"), "utf8");
+  const sqlGrants = fs.readFileSync(require.resolve("./db/synapse-grants.sql"), "utf8");
+  assert.deepEqual(run(pattern("names"), "./db/synapse-indexes.sql"), declaredIndexNames(sqlIdx));
+  assert.deepEqual(run(pattern("tables"), "./db/synapse-grants.sql"), declaredGrantTables(sqlGrants));
 });
 
 // -- leak audit 2026-10-01: F-G3 (who put it there) and F-G4 (the hint) -----
@@ -251,6 +277,19 @@ test("F-G3: answers cached before the uploader rule are never read back", async 
   assert.equal(d.allowed, false, "the stale pre-fix answers must not decide");
 });
 
+test("gate 3 redactions: answers cached before the redaction rule (keys \"2\") are never read back", async () => {
+  // A "2" answer counts a placement whose message was deleted; read back it
+  // would show a deleted post's image for six hours after the deploy.
+  const { deps, cache } = fakes({ fetchJoinedRooms: async () => ["!deleted-from:x"], queryMediaRooms: async () => ["!elsewhere:x"] });
+  cache.set("mediarooms2:mxc://41chan.net/m", ["!deleted-from:x"]);
+  cache.set("siteasset2:mxc://41chan.net/m", { v: true });
+  const d = await createMediaAuth(deps).decideMediaAccess("tok", "41chan.net", "m");
+  assert.equal(d.allowed, false);
+  const { mediaFactKeys } = require("./mediaauth-core");
+  assert.deepEqual(mediaFactKeys("mxc://41chan.net/m"), ["siteasset3:mxc://41chan.net/m", "mediarooms3:mxc://41chan.net/m"]);
+  assert.ok(cache.has("mediarooms3:mxc://41chan.net/m"), "the keys the reader clears are the keys the gate fills");
+});
+
 test("F-G4: the encrypted-room hint needs the uploader to have been in that room", async () => {
   const base = { queryMediaRooms: async () => [], fetchJoinedRooms: async () => ["!enc:x"], queryIsEncrypted: async () => true };
   const inRoom = createMediaAuth(fakes({ ...base, queryUploaderJoined: async (room, who) => room === "!enc:x" && who === "@up:x" }).deps);
@@ -276,10 +315,11 @@ test("F-G4: an uploader who joins the room after a refusal is not refused for th
   assert.equal(await auth.checkMediaAccess("tok", "41chan.net", "m", { roomId: "!enc:x" }), true, "a no is never cached");
 });
 
-test("the tracked grants SQL declares the two tables the uploader rule reads", () => {
+test("the tracked grants SQL declares the tables the uploader rule and the redaction rule read", () => {
   const { declaredGrantTables } = require("./mediaauth-core");
   const fs = require("node:fs");
   const tables = declaredGrantTables(fs.readFileSync(require.resolve("./db/synapse-grants.sql"), "utf8"));
-  assert.deepEqual(tables.sort(), ["local_media_repository", "room_memberships"]);
+  // redactions: gate 3 for posts (ruled 2026-10-15) -- a deleted message hides its image at once.
+  assert.deepEqual(tables.sort(), ["local_media_repository", "redactions", "room_memberships"]);
   assert.deepEqual(declaredGrantTables("-- GRANT SELECT ON nope TO x\nGRANT SELECT ON yes TO fourier_auth_ro;"), ["yes"]);
 });
