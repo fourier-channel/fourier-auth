@@ -452,7 +452,7 @@ test("a cache that cannot be cleared is said loudly and does not stop the push",
   });
   assert.equal(await r.step(), 2000);
   assert.equal(livePushes(b).length, 1);
-  assert.ok(said.some((m) => /could not clear the image gate's cached facts .*ECONNREFUSED.*up to 6 h/.test(m)), said.join("\n"));
+  assert.ok(said.some((m) => /could not clear the image gate's cached facts .*ECONNREFUSED.*up to 120 s/.test(m)), said.join("\n"));
 });
 
 test("isDataError and parseMxc: only SQLSTATE class 22 is a row's fault; only a well-formed mxc is an image", () => {

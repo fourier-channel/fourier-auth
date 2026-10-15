@@ -39,7 +39,7 @@ Bridge) and technetium.
    the message that made it has been redacted (operator ruling 2026-10-15:
    deleting a message hides its image at once -- at once for a fresh answer;
    an answer already cached is cleared within one poll by the gate 3 reader
-   when it is on, and with it off lives out its 6 h cache entry). Synapse's HTTP
+   when it is on, and with it off lives out its 120 s cache entry). Synapse's HTTP
    API is used only for `whoami` and `joined_rooms`. Synapse's
    authenticated-media endpoint is NOT used, because it authenticates the
    token but does not enforce room membership. Booru media asks a different
@@ -263,7 +263,9 @@ access (this machine or the tailnet, through no proxy; leak audit F-G5),
 since sampled twice they say when images are posted, private rooms
 included. With `GATE3_READER` off nothing clears the image gate's cache on
 a redaction: an image whose rooms were cached before its message was
-deleted stays readable to those rooms' members for up to 6 h.
+deleted stays readable to those rooms' members until that entry expires:
+120 s (mediaauth-core.js TTL.mediaRooms, shortened from 6 h on 2026-10-15 so
+the ruling holds with the reader off).
 
 `MEDIA_EDGE_SECRET`: the shared secret the Cloudflare Worker sends in
 `X-Fourier-Edge`. Presigned R2 URLs are released only to a request carrying

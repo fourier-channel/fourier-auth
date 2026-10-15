@@ -634,7 +634,7 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
         await onLiveAnswers(page.placements.mxcs.map((m) => m.mxc));
       } catch (err) {
         log.error(`[gate3-reader] could not clear the image gate's cached facts for ${page.placements.mxcs.length} image(s) ` +
-          `(${err.code || err.message}): a redaction among them reaches the image when its cache entry expires (up to 6 h), ` +
+          `(${err.code || err.message}): a redaction among them reaches the image when its cache entry expires (up to 120 s), ` +
           "not at once. Check fourier-redis; the push goes ahead.");
       }
     }

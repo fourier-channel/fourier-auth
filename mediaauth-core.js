@@ -24,21 +24,27 @@
 // now yes. Since 2026-10-15 an image's own lists also SHRINK: a redacted
 // placement stops counting (operator ruling: deleting a message hides its
 // image at once), and a list read before it shrank says yes to what is now
-// no. That stale allow is exactly what these lifetimes bound; the gate 3
-// reader, when on, cuts it to one poll (mediaRooms below).
+// no. That stale allow is exactly what these lifetimes bound -- so the two
+// lists a redaction can shrink live 120 s, the gate's own allow cache, which
+// keeps "at once" inside the ~3-minute bound a jailing already has with or
+// without the gate 3 reader; the reader, when on, cuts it to one poll.
 const TTL = {
-  // An mxc does not change what it IS; long.
-  siteAsset: 6 * 60 * 60,
+  // Whether an mxc is a site asset changes only when its avatar, room-icon or
+  // emote placement is set or redacted -- rare, but a redaction must land
+  // promptly (operator ruling 2026-10-15), so short, like mediaRooms. A miss
+  // is one index-backed query (0.1 ms warm, 3.6 ms cold, measured 2026-10-15).
+  siteAsset: 120,
   // The rooms containing an mxc grow (a repost, a forward) -- and, since
   // 2026-10-15, SHRINK when a placement is redacted (operator ruling: deleting
   // a message hides its image at once). A list cached before a redaction
   // would allow for up to this long, so the gate 3 reader, when it runs,
   // forgets the cached facts of every image a live event touches
-  // (mediaFactKeys; placements-reader.js onLiveAnswers). With the reader OFF
-  // nothing clears them, and a deleted message's image stays readable to its
-  // rooms' members for up to this long (README, GATE3_READER). Long, for the
-  // thumbnail walls this cache exists for.
-  mediaRooms: 6 * 60 * 60,
+  // (mediaFactKeys; placements-reader.js onLiveAnswers). It was 6 h, for the
+  // thumbnail walls; with the reader off that let a deleted message's image
+  // stay readable for up to 6 h, against the ruling. 120 s bounds it with no
+  // reader at all, and a wall still pays one cached answer per image per two
+  // minutes, shared by every viewer (a miss is ~0.1-0.4 ms, index-backed).
+  mediaRooms: 120,
   // Membership changes; this is the security-sensitive window where a
   // just-removed user could still fetch. Short.
   joinedRooms: 5 * 60,
