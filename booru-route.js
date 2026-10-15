@@ -17,13 +17,10 @@
 //      thumbnail, silently -- thirteen live posts on 2026-10-05, post 1 since
 //      2026-09-30. A refusal here is logged with its remedy and signalled.
 //      A file released this way is that post's, so step 2 is already answered.
-//      ONE MORE OPENING (operator ruling 2026-10-12): a FLAGGED post that came
-//      from Matrix (booru-quarantine.js reviewable) is what an Admin reviews on
-//      the booru, which hands them this door's address for it. Its file is
-//      released to a reader whose OWN booru session sees that post -- asked as
-//      them (booru-visibility.js readerSees), never anonymously, and only with
-//      a session. Jailed, banished and unflagged Matrix files never open here,
-//      and rooms (the Matrix door) still refuse a flagged one to everyone.
+//      That is the ONLY way a Matrix file passes this door: flagged or not,
+//      whoever asks, admins included. The reviewer's opening for a flagged
+//      Matrix post closed 2026-10-15: gate 3 is on and that review moved to
+//      sampling's jail panel, which reads the image from R2 itself.
 //   2. Does a post exist for this md5 that THIS REQUESTER may see? Asked of the
 //      booru (booru-visibility.js). If not, does a LIVE published page the
 //      reader holds the grant cookie for show it (publication-grants.js;
@@ -79,25 +76,13 @@ function makeBooruHandler(d) {
       let ownPost = false;
       if (await d.isMatrixImage(parsed.md5)) {
         ownPost = await d.visibility.seesNonMatrix(parsed.md5, viewer);
-        let unreviewed = "";
-        if (!ownPost && viewer) {
-          try {
-            ownPost = d.quarantine.reviewable(parsed.md5) && (await d.visibility.readerSees(parsed.md5, viewer));
-          } catch (err) {
-            if (!(err instanceof QuarantineUnavailable)) throw err;
-            // Not a 503: refusing is this door's answer for a Matrix file
-            // anyway. Only a reviewer's opening is lost, and the quarantine's
-            // own lamp is red.
-            unreviewed = ` A reviewer's opening was not checked: ${err.message}.`;
-          }
-        }
         if (!ownPost) {
           const mxc = await matrixIdOf(d, parsed.md5);
           d.log.warn(
             `[booru-media] REFUSED /booru/${parsed.md5}${variant ? ` (${variant})` : ""}: its file is Matrix media ${mxc} ` +
               "and no post this reader may see holds it outside Matrix, so it is served only through the Matrix door (room check). " +
               `Fix: if a booru post that did not come from Matrix should show it, ask posts.json?tags=md5:${parsed.md5}&only=id,source,is_deleted ` +
-              `for that post's source and visibility; index/md5/${parsed.md5}.json names the Matrix id.${unreviewed}`,
+              `for that post's source and visibility; index/md5/${parsed.md5}.json names the Matrix id.`,
           );
           d.signals.matrixRefused(`/booru/${parsed.md5} is Matrix media ${mxc}`);
           res.set("Cache-Control", "no-store");

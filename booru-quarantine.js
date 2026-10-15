@@ -25,11 +25,10 @@
 // only troll_jail (2026-10-12: jailed means deleted and is shown nowhere, so
 // the Matrix door refuses jailed Matrix media too).
 //
-// ONE OPENING (operator ruling 2026-10-12). A FLAGGED post that came from
-// Matrix -- flagged, not banished, not jailed, mxc-sourced: reviewable(md5) -- is what an
-// Admin reviews on the booru, and the booru hands them its booru-door address.
-// The booru door admits that file to a reader whose OWN booru session sees the
-// post (booru-route.js). Rooms still refuse it to everyone.
+// No row opens anywhere, to anyone: a flagged Matrix post is refused at the
+// Matrix door and, like every Matrix file, at the booru door (booru-route.js).
+// The reviewer's opening at the booru door closed 2026-10-15: gate 3 is on and
+// Matrix review moved to sampling's jail panel, which reads R2 itself.
 //
 // HOW FRESH. Polled every 30 s with If-None-Match (a 304 counts as a read).
 // From a flag landing to a refusal: about 90 s on the grant path (30 s poll +
@@ -82,9 +81,7 @@ function quarantineConfigProblem({ login, apiKey } = {}) {
 /**
  * The quarantine document as a function: ({ ifNoneMatch }) ->
  *   { notModified: true }                                   (304 to that ETag)
- *   { generation, etag, md5s: Set, mxcs: Set, reviewMd5s: Set }   (every page read)
- * reviewMd5s: the md5s of FLAGGED Matrix posts -- flagged === true, banished
- * and jailed not true, mxc set -- which the booru door may open to a reviewer.
+ *   { generation, etag, md5s: Set, mxcs: Set }   (every page read)
  * THROWS for "could not find out", including a failed shape check.
  */
 function booruQuarantineClient({ axios, baseUrl, login, apiKey, timeoutMs = 10000 }) {
@@ -140,16 +137,14 @@ function booruQuarantineClient({ axios, baseUrl, login, apiKey, timeoutMs = 1000
     if (first.notModified) return first;
     const md5s = new Set();
     const mxcs = new Set();
-    const reviewMd5s = new Set();
     let cur = first;
     for (let n = 1; ; n++) {
       if (cur.generation !== first.generation) return { restart: true };
       cur.posts.forEach((p) => {
         md5s.add(p.md5);
         if (p.mxc) mxcs.add(p.mxc);
-        if (p.flagged === true && p.banished !== true && p.jailed !== true && p.mxc) reviewMd5s.add(p.md5);
       });
-      if (cur.next === null) return { generation: first.generation, etag: first.etag, md5s, mxcs, reviewMd5s };
+      if (cur.next === null) return { generation: first.generation, etag: first.etag, md5s, mxcs };
       if (n >= MAX_PAGES) throw new Error(`the quarantine document ran past ${MAX_PAGES} pages; refused rather than read partly`);
       cur = await page(cur.next, null);
     }
@@ -170,7 +165,7 @@ function booruQuarantineClient({ axios, baseUrl, login, apiKey, timeoutMs = 1000
  *       and every check throws it); setTimer (setInterval by default).
  */
 function createQuarantine({ fetchDoc, now = Date.now, pollMs = 30000, staleMs = STALE_MS, alertMs = ALERT_MS, log = console, problem = null, setTimer = setInterval }) {
-  let doc = null; // { generation, etag, md5s, mxcs, reviewMd5s }
+  let doc = null; // { generation, etag, md5s, mxcs }
   let checkedAt = null;
   let reason = problem || null;
   let alerted = false;
@@ -181,13 +176,13 @@ function createQuarantine({ fetchDoc, now = Date.now, pollMs = 30000, staleMs = 
     try {
       const out = await fetchDoc({ ifNoneMatch: doc ? doc.etag || undefined : undefined });
       if (!out || !out.notModified) {
-        if (!out || typeof out.generation !== "string" || !(out.md5s instanceof Set) || !(out.mxcs instanceof Set) || !(out.reviewMd5s instanceof Set)) {
+        if (!out || typeof out.generation !== "string" || !(out.md5s instanceof Set) || !(out.mxcs instanceof Set)) {
           throw new Error("the quarantine client returned something that is not a document");
         }
         if (!doc || doc.generation !== out.generation) {
-          log.log(`[quarantine] generation ${doc ? doc.generation : "(none)"} -> ${out.generation}: ${out.md5s.size} md5(s), ${out.mxcs.size} Matrix id(s) refused, ${out.reviewMd5s.size} open to a reviewer's booru session`);
+          log.log(`[quarantine] generation ${doc ? doc.generation : "(none)"} -> ${out.generation}: ${out.md5s.size} md5(s), ${out.mxcs.size} Matrix id(s) refused`);
         }
-        doc = { generation: out.generation, etag: out.etag || null, md5s: out.md5s, mxcs: out.mxcs, reviewMd5s: out.reviewMd5s };
+        doc = { generation: out.generation, etag: out.etag || null, md5s: out.md5s, mxcs: out.mxcs };
       } else if (!doc) {
         throw new Error("a 304 arrived with no document held");
       }
@@ -263,13 +258,6 @@ function createQuarantine({ fetchDoc, now = Date.now, pollMs = 30000, staleMs = 
     return "allow";
   }
 
-  /** Is md5 a FLAGGED Matrix post's file, which the booru door may open to a reviewer? Throws like check(). */
-  function reviewable(md5) {
-    const why = unavailable();
-    if (why) throw new QuarantineUnavailable(why);
-    return !!md5 && doc.reviewMd5s.has(md5);
-  }
-
   /**
    * For /healthz. red: check() would throw, OR the booru has not been read for
    * over ALERT_MS (the stale grace is running -- loud from the first minute).
@@ -289,7 +277,7 @@ function createQuarantine({ fetchDoc, now = Date.now, pollMs = 30000, staleMs = 
     };
   }
 
-  const api = { start, poll, check, reviewable, health };
+  const api = { start, poll, check, health };
   return api;
 }
 

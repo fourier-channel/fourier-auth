@@ -62,24 +62,30 @@ test("one page: md5s and mxcs come back as sets; credentials ride in a Basic hea
   assert.equal(cfg.validateStatus(500), true, "every status is read, none thrown by axios");
 });
 
-test("a reviewable md5 is a FLAGGED Matrix post's: flagged, not banished, mxc-sourced", async () => {
-  // Operator ruling 2026-10-12: the booru door admits such a post's file to a
-  // reader whose own booru session sees it (an Admin reviewing it). A banished
-  // post, a 4chan post and a jail-only post are never reviewable here.
+test("every row is refused whatever its flags say -- a flagged Matrix post included; nothing is opened", async () => {
+  // The booru door's opening for a reviewer of a flagged Matrix post closed
+  // 2026-10-15 (gate 3 on; review moved to sampling's jail panel). The read
+  // carries the refused sets and nothing else.
   const D = "d".repeat(32);
   const E = "e".repeat(32);
+  const F = "f".repeat(32);
   const ax = fakeAxios(() => ok(doc({ posts: [
     { id: 1, md5: A, mxc: MXC, flagged: true, banished: false },
     { id: 2, md5: B, mxc: "mxc://41chan.net/Banished", flagged: true, banished: true },
     { id: 3, md5: C, mxc: null, flagged: true, banished: false },
     { id: 4, md5: D, mxc: "mxc://41chan.net/JailedOnly", flagged: false, banished: false, jailed: true },
     { id: 5, md5: E, mxc: "mxc://41chan.net/Truthy", flagged: "yes", banished: false },
-    // Flagged AND jailed: jailed means deleted and shown nowhere, so it is not
-    // opened here even before the booru is asked as the reader.
-    { id: 6, md5: "f".repeat(32), mxc: "mxc://41chan.net/FlaggedJailed", flagged: true, banished: false, jailed: true },
+    { id: 6, md5: F, mxc: "mxc://41chan.net/FlaggedJailed", flagged: true, banished: false, jailed: true },
   ] })));
   const out = await client(ax)({});
-  assert.deepEqual([...out.reviewMd5s], [A]);
+  assert.deepEqual([...out.md5s], [A, B, C, D, E, F]);
+  assert.deepEqual([...out.mxcs], [MXC, "mxc://41chan.net/Banished", "mxc://41chan.net/JailedOnly", "mxc://41chan.net/Truthy", "mxc://41chan.net/FlaggedJailed"]);
+  assert.deepEqual(Object.keys(out).sort(), ["etag", "generation", "md5s", "mxcs"]);
+  const q = createQuarantine({ fetchDoc: async () => out, now: () => 0, log: { error() {}, log() {} }, setTimer: () => ({ unref() {} }) });
+  await q.poll();
+  assert.equal(q.check({ md5: A }), "refuse");
+  assert.equal(q.check({ mxc: MXC }), "refuse");
+  assert.equal(q.reviewable, undefined, "no reviewer's opening is offered");
 });
 
 test("a post carrying only troll_jail is refused like any other row (jailed means deleted, shown nowhere)", async () => {
@@ -91,7 +97,6 @@ test("a post carrying only troll_jail is refused like any other row (jailed mean
   const q = createQuarantine({ fetchDoc: async () => out, now: () => 0, log: { error() {}, log() {} }, setTimer: () => ({ unref() {} }) });
   await q.poll();
   assert.equal(await matrixDoorVerdict({ quarantine: q, serverName: "41chan.net", mediaId: "JailedOnlyMediaAAAAAAAAA", md5s: [] }), "refuse");
-  assert.equal(q.reviewable(C), false, "a jailed post is not opened to a reviewer");
 });
 
 test("the names in the document are ignored: fourier-auth holds no tag name", async () => {
@@ -213,12 +218,11 @@ function harness({ answers, staleMs } = {}) {
   });
   return { q, logs, asked, advance: (ms) => { t += ms; } };
 }
-const read = (over = {}) => ({ generation: "0123456789abcdef", etag: '"0123456789abcdef-p"', md5s: new Set([A]), mxcs: new Set([MXC]), reviewMd5s: new Set([A]), ...over });
+const read = (over = {}) => ({ generation: "0123456789abcdef", etag: '"0123456789abcdef-p"', md5s: new Set([A]), mxcs: new Set([MXC]), ...over });
 
 test("before any good read, check() throws QuarantineUnavailable -- fail closed", async () => {
   const { q } = harness({ answers: [new Error("connect ECONNREFUSED")] });
   assert.throws(() => q.check({ md5: B }), QuarantineUnavailable);
-  assert.throws(() => q.reviewable(A), QuarantineUnavailable);
   await q.poll();
   assert.throws(() => q.check({ md5: B }), (e) => e instanceof QuarantineUnavailable && /ECONNREFUSED/.test(e.message));
   assert.equal(q.health().level, "red");
@@ -230,8 +234,6 @@ test("after a good read: a listed md5 or mxc is refused, anything else allowed",
   assert.equal(q.check({ md5: A, mxc: null }), "refuse");
   assert.equal(q.check({ md5: null, mxc: MXC }), "refuse");
   assert.equal(q.check({ md5: B, mxc: "mxc://41chan.net/other" }), "allow");
-  assert.equal(q.reviewable(A), true);
-  assert.equal(q.reviewable(B), false);
   assert.equal(q.health().generation, "0123456789abcdef");
   assert.equal(q.health().level, "green");
 });
@@ -272,11 +274,9 @@ test("stale grace (operator ruling 2026-10-12): the last good document serves fo
   await q.poll();
   assert.equal(q.check({ md5: A }), "refuse");
   assert.equal(q.check({ md5: B }), "allow");
-  assert.equal(q.reviewable(A), true);
   // ...and past it, everything is refused (fail closed), naming the last failure.
   advance(2);
   assert.throws(() => q.check({ md5: B }), (e) => e instanceof QuarantineUnavailable && /502/.test(e.message) && /1800s/.test(e.message));
-  assert.throws(() => q.reviewable(A), QuarantineUnavailable);
   assert.equal(q.health().level, "red");
 });
 

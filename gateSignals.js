@@ -64,7 +64,9 @@
 //                          document names it (a flagged or banished tag, or
 //                          troll_jail).
 //                          AMBER: flagged media is being asked for while it
-//                          awaits review. The detail is the path, never a tag.
+//                          awaits review -- in sampling's jail panel for a
+//                          Matrix post, in the booru's queue for any other.
+//                          The detail is the path, never a tag.
 //   quarantine_unavailable the quarantine document could not be read (or is
 //                          past its bound), so the Matrix door answered 503 and
 //                          grants were refused (fail closed). RED, with the fix.
@@ -198,7 +200,7 @@ class GateSignals {
         label: "pictures refused: in the booru's quarantine (flagged or banished tag, or jailed)",
         level: c.quarantine_refused > 0 ? "amber" : "green",
         detail: c.quarantine_refused > 0
-          ? `${c.quarantine_refused} in 10 min at the Matrix door or a publication's grant -- flagged media awaiting review in the booru's queue${last("quarantine_refused")}`
+          ? `${c.quarantine_refused} in 10 min at the Matrix door or a publication's grant -- flagged media awaiting review (a Matrix post in sampling's jail panel, any other in the booru's queue)${last("quarantine_refused")}`
           : "none in 10 min",
       },
       {

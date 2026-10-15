@@ -193,9 +193,10 @@ holds those in memory only and never a tag name. The Matrix door refuses
 such an image to every reader, admins included (404 "No such image.", after
 the room check, by mxc and by every md5 its one file is known under), and a
 published page's grant never reaches one. The booru door hides those posts
-by the booru's own answer, with ONE opening: a FLAGGED post that came from
-Matrix is released at the booru door to a reader whose own booru session
-sees it (an Admin reviewing it; asked as that reader, never anonymously).
+by the booru's own answer, and refuses a Matrix file to everyone, admins
+included, unless a visible non-Matrix post holds it -- flagged or not. (Its
+opening for an Admin reviewing a flagged Matrix post closed 2026-10-15: gate
+3 is on and that review is in sampling's jail panel, which reads R2.)
 When the booru cannot be read, the last good document keeps deciding for 30
 minutes (a tag flagged meanwhile takes effect when it returns), and the
 `booru-quarantine` check on `/healthz` is red from the first minute. Fail

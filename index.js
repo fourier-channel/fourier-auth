@@ -610,8 +610,11 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   // booru-quarantine.js). An image whose booru post carries a flagged or
   // banished tag, or troll_jail (jailed means deleted, shown nowhere), is
   // refused to EVERY Matrix reader, admins included -- this gate knows no
-  // booru level for a Matrix token; admins review a flagged one on the booru,
-  // whose door admits them by their own booru session (booru-route.js).
+  // booru level for a Matrix token. Nor does the booru door open it: a Matrix
+  // file passes there only when a visible, non-Matrix post holds it
+  // (booru-route.js). A flagged Matrix post is reviewed in sampling's jail
+  // panel, which reads R2 itself; the booru door's reviewer opening closed
+  // 2026-10-15, when gate 3 went on.
   // Asked after the room check, so a reader outside the room still gets the
   // 403 and learns nothing. Checked by mxc, and for local media by every md5
   // its one file is known under (mediar2.js localMd5s, cached with canon's

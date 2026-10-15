@@ -128,6 +128,10 @@ test("QUARANTINE: a refusal is AMBER and counted; it never names a tag", () => {
   const c = h.checks.find((x) => x.id === "quarantine-refused");
   assert.equal(c.level, "amber");
   assert.match(c.detail, /^1 in 10 min/);
+  // Gate 3 piece E (2026-10-15): a flagged Matrix post is reviewed in
+  // sampling's jail panel -- the booru door no longer opens its file -- so the
+  // lamp must not send the operator to the booru's queue for it.
+  assert.match(c.detail, /a Matrix post in sampling's jail panel/);
   assert.equal(h.counts.quarantine_refused, 1);
 });
 

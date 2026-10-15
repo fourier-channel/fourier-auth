@@ -204,29 +204,3 @@ test("a reader's answer is cached under their session's hash, never the session 
   assert.ok(!keys.includes("the-real-cookie-value"), keys);
   assert.ok(cache.has(`boorusees:v${deps.hashKey("the-real-cookie-value")}:${md5(7)}`), keys);
 });
-
-test("readerSees: asked AS the reader only -- an anonymous yes, cached or not, never stands in for theirs", async () => {
-  // The booru door's admission of a flagged Matrix post's file (operator
-  // ruling 2026-10-12) must be the READER's own answer: the anonymous answer
-  // can still be a cached yes for up to 120 s after a flag lands, and it would
-  // admit any member.
-  const { deps, calls, cache } = fakes({
-    fetchVisible: async (m, viewer) => {
-      calls.push({ m, viewer });
-      const sees = viewer && viewer.sessionCookie === "admin-session" ? new Set([md5(2)]) : new Set([md5(1), md5(2)]);
-      return new Set(m.filter((x) => sees.has(x)));
-    },
-  });
-  const v = createBooruVisibility(deps, { windowMs: 0 });
-  cache.set(`boorusees:${md5(3)}`, { v: true, nm: false });
-  const admin = { sessionCookie: "admin-session", clientIp: "203.0.113.9" };
-  const member = { sessionCookie: "member-session-x" };
-  assert.equal(await v.readerSees(md5(2), admin), true);
-  assert.equal(await v.readerSees(md5(3), admin), false, "a cached anonymous yes is not the reader's yes");
-  assert.equal(calls.every((c) => c.viewer && c.viewer.sessionCookie), true, "never asked anonymously");
-  const before = calls.length;
-  assert.equal(await v.readerSees(md5(2), null), false);
-  assert.equal(await v.readerSees(md5(2), {}), false);
-  assert.equal(calls.length, before, "no session, no ask");
-  assert.equal(await v.readerSees(md5(3), member), false);
-});
