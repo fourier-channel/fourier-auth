@@ -64,6 +64,8 @@ services:
       # GATE3_READER comes from .env too, off by default; any value but on/off
       # keeps it off and red on /healthz.
       - GATE3_READER=${GATE3_READER:-off}
+      # One sweep lap's length, hours (default 24). Shorter only for a backfill lap.
+      - GATE3_SWEEP_LAP_HOURS=${GATE3_SWEEP_LAP_HOURS:-24}
       - BOORU_PLACEMENTS_LOGIN=${BOORU_PLACEMENTS_LOGIN}
       - BOORU_PLACEMENTS_API_KEY=${BOORU_PLACEMENTS_API_KEY}
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
