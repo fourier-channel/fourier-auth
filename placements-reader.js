@@ -405,7 +405,7 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
    * processed } where end is where the page was cut and processed lists every
    * ordering it accounted for.
    */
-  async function buildPage(q, { stream, from, to, snapshot, late = [], lateSkipped = [] }) {
+  async function buildPage(q, { stream, from, to, snapshot, lap = null, late = [], lateSkipped = [] }) {
     const skipped = [...lateSkipped];
     const pageRows = await readRows(q, from, to, o.rowLimit, skipped);
     let end = pageRows.length >= o.rowLimit ? pageRows[pageRows.length - 1].stream_ordering : to;
@@ -483,8 +483,14 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
       newest_ordering: Math.max(...kept.filter((t) => t.mxc === a.mxc).map((t) => t.ordering)),
     }));
     const inPage = (ord) => ord <= end;
+    // A sweep page names its LAP (the lap's start, epoch ms). The booru resets
+    // its sweep cursor when the lap is newer and only advances it within a
+    // lap; without the marker a booru that only moves cursors upward kept the
+    // old lap's end, and a reader restarted mid-lap never finished one
+    // (GATE3_CONTRACTS.md A2).
     const placements = {
       stream,
+      ...(stream === "sweep" ? { lap } : {}),
       from,
       to: end,
       snapshot,
@@ -534,7 +540,7 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
       st.disagree[stream] = { booru: booruAt, reader: placements.to, at: new Date(now()).toISOString() };
       if (!was) {
         const why = stream === "sweep" && booruAt !== null && booruAt > placements.to
-          ? "a booru that keeps the highest sweep cursor did not take this lap's restart from the tail, so a restart resumes at its cursor and this lap starts again (GATE3_CONTRACTS.md A2: a sweep push from below the stored cursor is a new lap)"
+          ? "the booru did not reset its sweep cursor for this push's newer lap, so a restart resumes at its old cursor and this lap starts again (GATE3_CONTRACTS.md A2: a sweep push whose lap is newer than the stored lap_started_at resets the cursor)"
           : booruAt !== null && booruAt > placements.to
             ? "the booru holds a cursor this reader never pushed: a second reader, or a booru or Synapse restored from another time"
             : "the booru did not advance to the page this reader pushed";
@@ -659,7 +665,7 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
         s = { pos: b.tail - 1, lapTail: b.tail - 1, lapHead: b.head, lapStartedAt: now(), laps: s ? s.laps : 0, fresh: true };
       }
       const to = Math.min(s.lapHead, s.pos + o.windowIds);
-      const page = await buildPage(q, { stream: "sweep", from: s.pos, to, snapshot: { head: b.head, at: b.at } });
+      const page = await buildPage(q, { stream: "sweep", from: s.pos, to, snapshot: { head: b.head, at: b.at }, lap: s.lapStartedAt });
       return { s, page };
     });
     const { s, page } = out;

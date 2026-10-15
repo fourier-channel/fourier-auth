@@ -377,6 +377,13 @@ test("sweep: lap 1 starts below the tail (negative orderings included), is paced
   await r.step();
   assert.equal(sweeps().length, 3);
   assert.equal(sweeps()[2].from, -51, "lap 2 starts at the tail again");
+  // Every sweep page names its lap: one value through a lap, a newer one for
+  // the next, so the booru can reset its cursor for a new lap (contract A2).
+  const laps = sweeps().map((p) => p.lap);
+  assert.ok(laps.every((l) => Number.isInteger(l)), JSON.stringify(laps));
+  assert.equal(laps[0], laps[1], "one lap, one marker");
+  assert.ok(laps[2] > laps[1], "the next lap's marker is newer");
+  assert.ok(!b.pushes.some((p) => p.placements.stream === "live" && "lap" in p.placements), "live pages carry no lap");
 });
 
 test("sweep: never runs while the live cursor is behind", async () => {
@@ -609,7 +616,7 @@ test("sweep: a booru that keeps only the HIGHEST sweep cursor did not take the l
   await r.step();
   assert.equal(r.health().level, "amber");
   assert.equal(r.health({ detail: true }).booru_cursor_disagrees.sweep.booru, 100);
-  assert.ok(said.some((m) => /did not take this lap's restart from the tail/.test(m)), said.join("\n"));
+  assert.ok(said.some((m) => /did not reset its sweep cursor for this push's newer lap/.test(m)), said.join("\n"));
 });
 
 test("stale: one reader's snapshots only get newer, so a stale answer is another writer -- amber for five minutes after the last", async () => {
