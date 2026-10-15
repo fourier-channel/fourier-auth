@@ -60,9 +60,10 @@ services:
       # until the booru's receiving mode is deployed and
       # tools/ensure-synapse-indexes.sh has built events_gate3_placement_idx
       # and granted SELECT on redactions. On, it pushes as the booru's gate
-      # account with a key of its own (fourier_jail:create and :index), both
-      # in .env. Any value but on/off keeps it off and red on /healthz.
-      - GATE3_READER=off
+      # account (its key holds fourier_jail:create and :index), both in .env.
+      # GATE3_READER comes from .env too, off by default; any value but on/off
+      # keeps it off and red on /healthz.
+      - GATE3_READER=${GATE3_READER:-off}
       - BOORU_PLACEMENTS_LOGIN=${BOORU_PLACEMENTS_LOGIN}
       - BOORU_PLACEMENTS_API_KEY=${BOORU_PLACEMENTS_API_KEY}
       - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
