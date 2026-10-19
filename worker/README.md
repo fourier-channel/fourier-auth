@@ -105,13 +105,15 @@ same day, so the version above is the first of that deploy, not the last.
 Deployed from the box as root with the command below (wrangler 3 via npx;
 nothing is installed in the checkout).
 
-**Bound 2026-10-09, not yet deployed: `sample.41chan.net/fourier/booru/*`.**
+**Bound 2026-10-09, live since that day's deploys (latest 2026-10-13 03:07 UTC,
+version `ac3c1b42`): `sample.41chan.net/fourier/booru/*`.**
 Sampling moved to its own host (operator ruling 2026-10-09), and its external
 view and published pages ask for the same root-absolute `/fourier/booru/...`
 pictures there, carrying the page's host-only `fourier_pub_<hash>` grant; only
 a route on that host receives it. Same shape and handler as the booru route.
-It takes effect on the next `wrangler deploy`; replace this paragraph's first
-line with that deploy's version when it lands.
+Checked 2026-10-19 with `npx wrangler deployments list` from the box (the deploy
+recipe below, `deployments list` in place of `deploy`) -- the way to answer
+"is it deployed", since the gate answers the sample path identically either way.
 
 **Deployed 2026-09-19, version `6f57b797`, fourier-auth c0f18fb:** a booru
 request with NO credential is now asked of the gate rather than refused with
