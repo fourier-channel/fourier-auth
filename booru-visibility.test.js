@@ -204,3 +204,85 @@ test("a reader's answer is cached under their session's hash, never the session 
   assert.ok(!keys.includes("the-real-cookie-value"), keys);
   assert.ok(cache.has(`boorusees:v${deps.hashKey("the-real-cookie-value")}:${md5(7)}`), keys);
 });
+
+// -- load: the 2026-10-19 refusal burst ------------------------------------------
+//
+// The booru's md5 ask drifted from 115 ms (2026-10-01) to ~0.5-1 s, a gallery
+// fanned out to dozens of 1-2 md5 asks across every puma worker, and the tail
+// queued past the 4 s budget: 79 refusals in three minutes. A wider window
+// makes fewer, fuller asks; a cap on asks in flight stops a burst from
+// queueing inside the booru; a deadline counted from the reader's ask keeps
+// the answer fail-closed and on time.
+
+test("40 thumbnails asked over 40 ms make at most 2 booru asks", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const { deps, calls } = fakes({ fetchVisible: async (m) => { calls.push(m); return new Set(m); } });
+  const v = createBooruVisibility(deps);
+  const asks = [];
+  for (let i = 0; i < 40; i++) {
+    asks.push(v.sees(md5(i)));
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(1);
+  }
+  t.mock.timers.tick(100);
+  const out = await Promise.all(asks);
+  assert.ok(out.every(Boolean));
+  assert.ok(calls.length <= 2, `${calls.length} asks for 40 md5s over 40 ms`);
+});
+
+test("with the booru stalled, asks beyond the cap are not sent and still fail closed at their deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const sent = [];
+  const { deps } = fakes({ fetchVisible: (m) => { sent.push(m); return new Promise(() => {}); } });
+  const v = createBooruVisibility(deps, { windowMs: 0, maxBatch: 1, maxInflight: 3, deadlineMs: 4000 });
+  const asks = [0, 1, 2, 3].map((i) => v.sees(md5(i)).then(() => "answered", (e) => e));
+  for (let i = 0; i < 5; i++) { await new Promise((r) => setImmediate(r)); t.mock.timers.tick(0); }
+  assert.equal(sent.length, 3, "the cap holds the fourth ask back");
+  t.mock.timers.tick(4000);
+  const out = await Promise.all(asks);
+  for (const r of out) assert.ok(r instanceof BooruUnavailable, String(r));
+  assert.equal(sent.length, 3, "an ask past its deadline is never sent");
+  assert.equal(v.pendingCount(), 0);
+});
+
+test("the booru is given only what is left of the reader's budget", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const budgets = [];
+  const { deps } = fakes({ fetchVisible: async (m, viewer, o) => { budgets.push(o && o.timeoutMs); return new Set(m); } });
+  const v = createBooruVisibility(deps, { windowMs: 50, deadlineMs: 4000 });
+  const p = v.sees(md5(1));
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(50);
+  assert.equal(await p, true);
+  assert.equal(budgets[0], 3950);
+});
+
+test("a late answer is not an answer to the reader, but is still cached", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let answer;
+  const { deps, cache } = fakes({ fetchVisible: (m) => new Promise((r) => { answer = () => r(new Set(m)); }) });
+  const v = createBooruVisibility(deps, { windowMs: 0, deadlineMs: 4000 });
+  const p = v.sees(md5(5)).then(() => "answered", (e) => e);
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(0);
+  t.mock.timers.tick(4000);
+  assert.ok((await p) instanceof BooruUnavailable);
+  answer();
+  for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(cache.get(`boorusees:${md5(5)}`).v, true, "the next reader is answered from it");
+});
+
+test("health: unmeasured is amber, a p95 inside half the budget is green, refusals are amber", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let ms = 100;
+  const { deps } = fakes({ fetchVisible: async (m) => { t.mock.timers.tick(ms); return new Set(m); } });
+  const v = createBooruVisibility(deps, { windowMs: 0, deadlineMs: 4000 });
+  assert.equal(v.health().level, "amber");
+  for (let i = 0; i < 10; i++) { const p = v.sees(md5(100 + i)); await new Promise((r) => setImmediate(r)); t.mock.timers.tick(0); await p; }
+  const h = v.health();
+  assert.equal(h.level, "green", h.detail);
+  assert.match(h.detail, /p95 100 ms of a 4000 ms budget/);
+  ms = 2500;
+  for (let i = 0; i < 10; i++) { const p = v.sees(md5(200 + i)); await new Promise((r) => setImmediate(r)); t.mock.timers.tick(0); await p; }
+  assert.equal(v.health().level, "amber", "the drift from 115 ms to seconds is reported before it refuses anyone");
+});

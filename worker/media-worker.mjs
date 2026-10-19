@@ -183,6 +183,9 @@ export async function resolveUpstream(fetchImpl, url, credentials, edge = {}) {
  * not ~6 -- and the cost is one more round trip per reader per image per
  * minute, which the gate answers from Redis.
  */
+/** The gate's 503 says "try again in 2 s"; the edge keeps that refusal as long. */
+export const RETRY_AFTER_S = 2;
+
 export function decisionTtl(kind) {
   return kind === "booru" ? 60 : 150;
 }
@@ -421,8 +424,14 @@ export default {
     // avoid. The TTLs themselves (150 s Matrix, 60 s booru) are bounds on how
     // long a just-hidden image keeps serving -- see decisionTtl.
     //
-    // ALLOWS ONLY. A cached denial would lock a user out of a room they just
-    // joined for the rest of the window, and denials are cheap to re-ask.
+    // ALLOWS, and one kind of refusal. A cached denial would lock a user out of
+    // a room they just joined for the rest of the window, and denials are
+    // cheap to re-ask. The exception is the gate's 503 ("could not decide
+    // right now", Retry-After 2): it is kept for exactly its Retry-After, so a
+    // burst of retries -- the booru's error card re-probes every failed image
+    // -- waits here instead of piling onto a gate that is already behind
+    // (2026-10-19: 79 refusals in three minutes while the booru was slow). It
+    // is still a refusal, so this fails closed; it only spares the gate.
     const authzUrl = authUrl(env.FOURIER_AUTH_BASE, parsed, url.searchParams);
     const cache = caches.default;
     const authzKey = await decisionKey(authzUrl, authorization || cookie);
@@ -439,9 +448,10 @@ export default {
       decision = await resolveUpstream(fetch, authzUrl, { authorization, cookie },
         { secret: env.MEDIA_EDGE_SECRET, clientIp: request.headers.get("CF-Connecting-IP") });
       if (decision.withheld) console.error("the gate WITHHELD the media URL: MEDIA_EDGE_SECRET here does not match the gate's");
-      if (decision.ok) {
+      const keep = decision.ok ? decisionTtl(parsed.kind) : decision.status === 503 ? RETRY_AFTER_S : 0;
+      if (keep) {
         ctx.waitUntil(cache.put(authzKey, new Response(JSON.stringify(decision), {
-          headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${decisionTtl(parsed.kind)}` },
+          headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${keep}` },
         })));
       }
     }
@@ -470,7 +480,7 @@ export default {
       const r = deny(status, DENIAL[status].errcode, DENIAL[status].error, cors);
       // The gate's 503 is "this image is being made into its one file": a
       // retry in a moment succeeds, and the client is told so.
-      if (status === 503) r.headers.set("Retry-After", "2");
+      if (status === 503) r.headers.set("Retry-After", String(RETRY_AFTER_S));
       return r;
     }
 

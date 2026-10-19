@@ -436,3 +436,36 @@ test("authUrl: a file version v=<md5> is forwarded, so a replaced picture's new 
   const plain = authUrl("https://a.example", { serverName: "41chan.net", mediaId: "abc", kind: "download" }, new URLSearchParams("canon=1"));
   assert.equal(new URL(plain).searchParams.get("v"), null);
 });
+
+test("a gate 503 is kept at the edge for its Retry-After, so retries wait there; any other refusal is not kept", async () => {
+  for (const [gateStatus, kept] of [[503, true], [403, false], [404, false]]) {
+    const store = new Map();
+    const puts = [];
+    let gateCalls = 0;
+    globalThis.caches = { default: {
+      match: async (req) => store.get(typeof req === "string" ? req : req.url),
+      put: async (req, res) => { puts.push(res.headers.get("Cache-Control")); store.set(req.url, res); },
+    } };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.startsWith("https://mxc.example/")) { gateCalls++; return new Response("{}", { status: gateStatus }); }
+      throw new Error("no byte may be fetched on a refusal");
+    };
+    try {
+      for (let i = 0; i < 2; i++) {
+        const req = new Request("https://booru.41chan.net/fourier/booru/" + "b".repeat(32) + ".png", { headers: { Cookie: "_danbooru2_session=s" } });
+        const waits = [];
+        const res = await worker.fetch(req, { FOURIER_AUTH_BASE: "https://mxc.example", MEDIA_EDGE_SECRET: "k" }, { waitUntil: (p) => waits.push(p) });
+        await Promise.all(waits);
+        assert.equal(res.status, gateStatus, `gate ${gateStatus}, ask ${i + 1}`);
+        if (gateStatus === 503) assert.equal(res.headers.get("Retry-After"), "2");
+      }
+      assert.equal(gateCalls, kept ? 1 : 2, `gate ${gateStatus}: the second ask ${kept ? "waits at the edge" : "is asked again"}`);
+      assert.deepEqual(puts, kept ? ["max-age=2"] : []);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete globalThis.caches;
+    }
+  }
+});

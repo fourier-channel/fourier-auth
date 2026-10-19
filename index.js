@@ -279,6 +279,9 @@ app.get("/healthz", async (req, res) => {
         : "the last read failed; the last good document is still inside its bound",
     },
     placementsReader ? placementsReader.health({ detail }) : readerOffHealth(gate3Config),
+    // The booru door's ask, timed against its deadline (2026-10-19: it drifted
+    // from 115 ms to over a second with nothing reporting it, then refused).
+    { id: "booru-visibility", label: "booru visibility asks, p95 against the deadline", ...booruVisibility.health() },
     ...gate.checks,
   ];
   const level = checks.some((c) => c.level === "red") ? "red"

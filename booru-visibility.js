@@ -47,11 +47,21 @@
 //
 // COST. A booru page draws dozens of thumbnails at once. Asks are coalesced
 // per md5 and batched per viewer: everything that arrives within WINDOW_MS
-// goes out as one IN query (measured 2026-10-01 from inside the fourier-auth
-// container: three md5s, 115 ms cold). Answers are cached in Redis --
-// positive longer than negative, because a positive answer is the one whose
-// staleness matters (a just-jailed image) and a negative one only delays a
-// just-posted image.
+// goes out as one ask. Answers are cached in Redis -- positive longer than
+// negative, because a positive answer is the one whose staleness matters (a
+// just-jailed image) and a negative one only delays a just-posted image.
+//
+// WHAT AN ASK COSTS IS MEASURED, NOT REMEMBERED. 2026-10-01, from inside this
+// container: three md5s, 115 ms cold, and the window was 8 ms. By 2026-10-19
+// the same ask cost 0.5-1.1 s (the booru's gallery path builds its hidden
+// aichan_ list on every search), an 8 ms window cut a gallery into dozens of
+// 1-2 md5 asks across every puma worker, and the tail queued past the budget:
+// 79 refusals in three minutes, with nothing here having reported the drift.
+// So: a 50 ms window (fewer, fuller asks), at most MAX_INFLIGHT asks at the
+// booru at once (a burst waits here, where its deadline is known, rather than
+// inside the booru), a DEADLINE counted from the reader's ask rather than from
+// when the booru was finally asked, and every ask's duration kept so /healthz
+// reports p95 against that deadline before it refuses anyone.
 //
 // BATCH CEILING = 20, and it is not a tuning knob. Below the booru's
 // full_browsing_level (anonymous is below it) a search returns at most
@@ -61,12 +71,24 @@
 // picture. If that booru setting is ever LOWERED, lower this with it.
 //
 // FAILURE. If the booru cannot be asked -- timeout, refused, a non-200, a body
-// that is not a JSON array -- every waiting ask rejects with BooruUnavailable
-// and NOTHING is cached. The route answers 503 (fail CLOSED) and logs it; a
-// silent fall-open here would be the very leak this file closes.
+// that is not a JSON array, or no answer within DEADLINE_MS of the reader's
+// ask -- every waiting ask rejects with BooruUnavailable and NOTHING is
+// cached. The route answers 503 (fail CLOSED) and logs it; a silent fall-open
+// here would be the very leak this file closes. An answer that arrives after
+// its deadline is still a true answer: it is cached for the next reader, never
+// handed to the one who was already refused.
 
 const MAX_BATCH = 20;
-const WINDOW_MS = 8;
+const WINDOW_MS = 50;
+const MAX_INFLIGHT = 6;
+const DEADLINE_MS = 4000;
+// Kept for /healthz: the last SAMPLE_LIMIT asks, none older than SAMPLE_AGE_MS.
+const SAMPLE_LIMIT = 500;
+const SAMPLE_AGE_MS = 60 * 60 * 1000;
+// A refusal this recent keeps the health check amber.
+const REFUSAL_MEMORY_MS = 15 * 60 * 1000;
+// An ask slower than this is logged on its own line.
+const SLOW_MS = 1000;
 const TTL = {
   // Bounds how long a just-jailed or just-deleted image stays servable to a
   // viewer who already had it allowed. Together with the Worker's 60 s
@@ -102,9 +124,9 @@ class BooruUnavailable extends Error {
  *   reader's cookies -- and the reader's IP rides as X-Forwarded-For so the
  *   booru records their own address on their account, not this container's.
  */
-function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", timeoutMs = 4000 }) {
+function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", timeoutMs = DEADLINE_MS }) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
-  return async function fetchVisible(md5s, viewer = null) {
+  return async function fetchVisible(md5s, viewer = null, opts = {}) {
     if (!Array.isArray(md5s) || md5s.length === 0) return new Map();
     if (md5s.length > MAX_BATCH) throw new Error(`batch of ${md5s.length} exceeds the booru's ${MAX_BATCH}-row ceiling`);
     const headers = { Accept: "application/json" };
@@ -115,7 +137,9 @@ function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", t
     const r = await axios.get(`${base}/posts.json`, {
       params: { tags: `md5:${md5s.join(",")}`, only: "md5,is_deleted,source", limit: md5s.length },
       headers,
-      timeout: timeoutMs,
+      // What is left of the reader's budget, so a stalled booru frees its
+      // slot when the reader has already been refused, not 4 s later.
+      timeout: Math.max(1, Math.min(timeoutMs, opts.timeoutMs ?? timeoutMs)),
       // Never follow a redirect: a 302 to a login page is not an answer.
       maxRedirects: 0,
       validateStatus: () => true,
@@ -142,52 +166,122 @@ function booruPostsClient({ axios, baseUrl, cookieName = "_danbooru2_session", t
 
 /**
  * deps:
- *   fetchVisible(md5s, viewer) -> Map<md5, {nonMatrix}> (a Set is read as
- *                                 "visible, source unknown")  (throws = could not find out)
+ *   fetchVisible(md5s, viewer, {timeoutMs}) -> Map<md5, {nonMatrix}> (a Set is
+ *                                 read as "visible, source unknown")  (throws = could not find out)
  *   cacheGet(key) -> value|null, cacheSet(key, value, ttlSeconds)
  *   hashKey(string) -> string                (session cookies never become keys)
- * opts: { ttl, windowMs, maxBatch, setTimer }
+ *   log?: { warn(msg) }                      (slow asks; default console)
+ * opts: { ttl, windowMs, maxBatch, maxInflight, deadlineMs, now, setTimer, clearTimer }
  */
 function createBooruVisibility(deps, opts = {}) {
   const ttl = { ...TTL, ...(opts.ttl || {}) };
   const windowMs = opts.windowMs ?? WINDOW_MS;
   const maxBatch = Math.min(opts.maxBatch ?? MAX_BATCH, MAX_BATCH);
+  const maxInflight = Math.max(1, opts.maxInflight ?? MAX_INFLIGHT);
+  const deadlineMs = opts.deadlineMs ?? DEADLINE_MS;
+  const now = opts.now || (() => Date.now());
   const setTimer = opts.setTimer || ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = opts.clearTimer || ((t) => clearTimeout(t));
+  const log = deps.log || console;
 
-  // groupKey -> { viewer, pending: Map<md5, {resolve, reject}>, timer }
+  // groupKey -> { viewer, pending: Map<md5, {resolve, reject}>, timer, firstAt }
   const groups = new Map();
   // groupKey + md5 -> Promise<boolean>; one ask per md5 per viewer in flight.
   const inflight = new Map();
+  // Batches waiting for a slot at the booru, oldest first.
+  const queue = [];
+  let active = 0;
+  // { at, ms, size } per answered ask; refusal times.
+  const samples = [];
+  let lastRefusalAt = null, refusals = 0;
+
+  function settle(b, fn) {
+    if (b.settled) return false;
+    b.settled = true;
+    clearTimer(b.deadlineTimer);
+    for (const [md5, d] of b.pending) { inflight.delete(b.groupKey + md5); fn(md5, d); }
+    return true;
+  }
+
+  function refuse(b, err) {
+    if (settle(b, (_, d) => d.reject(err))) { lastRefusalAt = now(); refusals++; }
+  }
 
   function flush(groupKey) {
     const g = groups.get(groupKey);
     if (!g) return;
     groups.delete(groupKey);
     if (g.timer) clearTimer(g.timer);
-    const batch = g.pending;
-    const md5s = [...batch.keys()];
+    const b = { groupKey, viewer: g.viewer, pending: g.pending, deadlineAt: g.firstAt + deadlineMs, settled: false, sent: false };
+    b.deadlineTimer = setTimer(() => {
+      const where = b.sent ? "the booru did not answer" : `no slot at the booru (${active} asks in flight)`;
+      refuse(b, new BooruUnavailable(new Error(`no answer within ${deadlineMs} ms of the ask: ${where}`)));
+      const i = queue.indexOf(b);
+      if (i >= 0) queue.splice(i, 1);
+    }, Math.max(0, b.deadlineAt - now()));
+    queue.push(b);
+    pump();
+  }
+
+  function pump() {
+    while (active < maxInflight && queue.length) {
+      const b = queue.shift();
+      if (b.settled) continue;
+      send(b);
+    }
+  }
+
+  function send(b) {
+    active++;
+    b.sent = true;
+    const md5s = [...b.pending.keys()];
+    const t0 = now();
+    const left = b.deadlineAt - t0;
     (async () => {
       let seen;
       try {
-        seen = await deps.fetchVisible(md5s, g.viewer);
+        seen = await deps.fetchVisible(md5s, b.viewer, { timeoutMs: left });
       } catch (err) {
-        const e = err instanceof BooruUnavailable ? err : new BooruUnavailable(err);
-        for (const [md5, d] of batch) { inflight.delete(groupKey + md5); d.reject(e); }
+        refuse(b, err instanceof BooruUnavailable ? err : new BooruUnavailable(err));
         return;
       }
-      for (const [md5, d] of batch) {
+      const ms = now() - t0;
+      samples.push({ at: now(), ms, size: md5s.length });
+      if (samples.length > SAMPLE_LIMIT) samples.shift();
+      if (ms >= SLOW_MS) {
+        try { log.warn(`[booru-visibility] slow ask: ${ms} ms for ${md5s.length} md5(s), ${t0 - (b.deadlineAt - deadlineMs)} ms queued, ${active} in flight`); } catch {}
+      }
+      const answers = new Map();
+      for (const md5 of md5s) {
         const v = seen.has(md5);
         const facts = v && typeof seen.get === "function" ? seen.get(md5) : null;
         const nm = !!(facts && facts.nonMatrix === true);
-        const life = g.viewer ? (v ? ttl.viewerVisible : ttl.viewerHidden) : (v ? ttl.visible : ttl.hidden);
+        const life = b.viewer ? (v ? ttl.viewerVisible : ttl.viewerHidden) : (v ? ttl.visible : ttl.hidden);
+        answers.set(md5, { v, nm });
         // Not awaited: the reader is not kept waiting on Redis. A miss in the
-        // gap only costs one more ask, never a wrong answer.
-        Promise.resolve().then(() => deps.cacheSet(cacheKey(groupKey, md5), { v, nm }, life)).catch(() => {});
-        inflight.delete(groupKey + md5);
-        d.resolve({ v, nm });
+        // gap only costs one more ask, never a wrong answer. Cached even when
+        // the reader's deadline has passed: a late answer is still the answer.
+        Promise.resolve().then(() => deps.cacheSet(cacheKey(b.groupKey, md5), { v, nm }, life)).catch(() => {});
       }
-    })();
+      settle(b, (md5, d) => d.resolve(answers.get(md5)));
+    })().finally(() => { active--; pump(); });
+  }
+
+  function health() {
+    const t = now();
+    while (samples.length && t - samples[0].at > SAMPLE_AGE_MS) samples.shift();
+    const recentRefusal = lastRefusalAt !== null && t - lastRefusalAt < REFUSAL_MEMORY_MS;
+    if (!samples.length) {
+      return { level: "amber", detail: recentRefusal ? `no ask answered in the last hour; last refusal ${Math.round((t - lastRefusalAt) / 1000)} s ago` : "no ask measured yet" };
+    }
+    const ms = samples.map((x) => x.ms).sort((a, b) => a - b);
+    const pct = (q) => ms[Math.min(ms.length - 1, Math.ceil(q * ms.length) - 1)];
+    const p95 = pct(0.95);
+    const size = (samples.reduce((a, x) => a + x.size, 0) / samples.length).toFixed(1);
+    let detail = `p95 ${p95} ms of a ${deadlineMs} ms budget (p50 ${pct(0.5)} ms, ${samples.length} asks, ${size} md5/ask)`;
+    if (recentRefusal) detail += `; refused ${Math.round((t - lastRefusalAt) / 1000)} s ago (${refusals} batches since start)`;
+    const level = p95 > deadlineMs / 2 || recentRefusal ? "amber" : "green";
+    return { level, detail };
   }
 
   function cacheKey(groupKey, md5) {
@@ -199,7 +293,7 @@ function createBooruVisibility(deps, opts = {}) {
     const existing = inflight.get(fk);
     if (existing) return existing;
     let g = groups.get(groupKey);
-    if (!g) { g = { viewer, pending: new Map(), timer: null }; groups.set(groupKey, g); }
+    if (!g) { g = { viewer, pending: new Map(), timer: null, firstAt: now() }; groups.set(groupKey, g); }
     const p = new Promise((resolve, reject) => g.pending.set(md5, { resolve, reject }));
     inflight.set(fk, p);
     if (g.pending.size >= maxBatch) flush(groupKey);
@@ -242,7 +336,7 @@ function createBooruVisibility(deps, opts = {}) {
     return (await ask("v" + deps.hashKey(viewer.sessionCookie), viewer, md5)).nm;
   }
 
-  return { sees, seesNonMatrix, pendingCount: () => inflight.size };
+  return { sees, seesNonMatrix, health, pendingCount: () => inflight.size };
 }
 
-module.exports = { createBooruVisibility, booruPostsClient, BooruUnavailable, MAX_BATCH, TTL };
+module.exports = { createBooruVisibility, booruPostsClient, BooruUnavailable, MAX_BATCH, MAX_INFLIGHT, DEADLINE_MS, WINDOW_MS, TTL };
