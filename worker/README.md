@@ -105,6 +105,11 @@ same day, so the version above is the first of that deploy, not the last.
 Deployed from the box as root with the command below (wrangler 3 via npx;
 nothing is installed in the checkout).
 
+**Deployed 2026-10-19 06:21 UTC, version `e1107a7e`, fourier-auth 48e7718:**
+a gate 503 is kept at the edge for its Retry-After (2 s), under the same
+decision key, so a burst of retries waits here rather than reaching a gate
+that is already behind. Other refusals are still never kept.
+
 **Deployed 2026-10-19 06:03 UTC, version `3d8b385e`, fourier-auth 9fd3fb3:**
 `v=<md5>` (Technetium's file-version key) is forwarded to the gate, so a
 replaced picture's new URL is a fresh decision. Verified after deploy:
