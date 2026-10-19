@@ -111,6 +111,14 @@ export function authUrl(base, { serverName, mediaId, kind, file }, searchParams)
   // server cannot see which room such an mxc belongs to.
   const roomId = searchParams.get("room_id");
   if (roomId) u.searchParams.set("room_id", roomId);
+  // The FILE VERSION a client asks for (Technetium adds v=<md5> once a picture
+  // has been replaced; operator 2026-10-19, "a reload should be forced").
+  // fourier-auth ignores it. It is forwarded so it becomes part of the cached
+  // decision's key: a new version is a fresh decision, never a cached one
+  // still naming the old file -- which the browser would then keep, under the
+  // new URL, for a year.
+  const v = searchParams.get("v");
+  if (v && /^[0-9a-f]{32}$/.test(v)) u.searchParams.set("v", v);
   return u.toString();
 }
 

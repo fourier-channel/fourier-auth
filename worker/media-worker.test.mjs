@@ -423,3 +423,16 @@ test("SAMPLE: a published page's picture on sample.41chan.net carries its grant 
     delete globalThis.caches;
   }
 });
+
+test("authUrl: a file version v=<md5> is forwarded, so a replaced picture's new URL is a fresh decision; anything else named v is dropped", () => {
+  const md5 = "0123456789abcdef0123456789abcdef";
+  const dl = new URL(authUrl("https://a.example", { serverName: "41chan.net", mediaId: "abc", kind: "download" }, new URLSearchParams(`canon=1&v=${md5}`)));
+  assert.equal(dl.searchParams.get("v"), md5);
+  assert.equal(dl.searchParams.get("canon"), null);
+  const th = new URL(authUrl("https://a.example", { serverName: "41chan.net", mediaId: "abc", kind: "thumbnail" }, new URLSearchParams(`width=320&height=320&v=${md5}`)));
+  assert.equal(th.searchParams.get("v"), md5);
+  const junk = new URL(authUrl("https://a.example", { serverName: "41chan.net", mediaId: "abc", kind: "download" }, new URLSearchParams("v=../../x")));
+  assert.equal(junk.searchParams.get("v"), null);
+  const plain = authUrl("https://a.example", { serverName: "41chan.net", mediaId: "abc", kind: "download" }, new URLSearchParams("canon=1"));
+  assert.equal(new URL(plain).searchParams.get("v"), null);
+});

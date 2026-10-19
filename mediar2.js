@@ -367,7 +367,21 @@ async function thumbnailOfLastResort(s3, bucket, { mediaId, thumbSize, cache, as
   return idx.key;
 }
 
+// WHAT THE GATE REMEMBERS ABOUT ONE LOCAL MEDIA ID, by cache key. An index
+// entry was "written once and never changes" until creators could replace a
+// picture (operator, 2026-10-19: a repost of the same picture "gets replaced
+// everywhere"): fourier-tunnel re-points the index of every media id that
+// carried the old file, then asks the gate to forget these, so the next read
+// is the new file rather than a day-old memory of the old one. Variants are
+// keyed by md5 and need no forgetting -- a new file is a new md5.
+const MEDIA_ID_RE = /^[A-Za-z0-9_-]{1,255}$/;
+function forgetKeysFor(mediaId) {
+  if (!MEDIA_ID_RE.test(String(mediaId || ""))) return null;
+  return [`canonidx:${mediaId}`, `canonidx-none:${mediaId}`, `thumbkeys:local:${mediaId}`];
+}
+
 module.exports = {
+  forgetKeysFor,
   localOriginalKey,
   remoteOriginalKey,
   thumbnailPrefix,

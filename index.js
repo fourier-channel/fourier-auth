@@ -44,7 +44,7 @@ const { createBooruVisibility, booruPostsClient } = require("./booru-visibility"
 const { makeBooruHandler } = require("./booru-route");
 const { createPublicationGrants, samplingPublicationClient, pubHashes } = require("./publication-grants");
 const crypto = require("crypto");
-const { resolveR2Key, localMd5s, canonClient, OriginalUnavailable } = require("./mediar2");
+const { resolveR2Key, localMd5s, canonClient, OriginalUnavailable, forgetKeysFor } = require("./mediar2");
 const { booruQuarantineClient, createQuarantine, QuarantineUnavailable, matrixDoorVerdict, quarantineConfigProblem } = require("./booru-quarantine");
 // fourier-tunnel's canon.js, over the docker network: it makes a Matrix image into
 // the ONE stripped file the gate then serves (see mediar2.js canonicalOriginalKey).
@@ -755,6 +755,39 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   console.error(`[media] refused ${serverName}/${mediaId}: not in object storage${refusal ? ` (${refusal})` : ""}`);
   return res.status(404).json({ errcode: "M_NOT_FOUND", error: "media not in object storage" });
 });
+
+// THE INTERNAL DOOR (docker networks only: compose publishes PORT alone, and
+// nothing proxies this one). fourier-tunnel calls it after re-pointing canon's
+// index for a replaced picture's media ids, so the gate stops answering from
+// a cached index that names the old file. It only forgets: the worst a caller
+// can do is make the next read go to R2, which is the read that would have
+// happened without the cache.
+const INTERNAL_PORT = 8012; // fixed: callers name it (fourier-tunnel FOURIER_AUTH_INTERNAL), and it is never published
+const internal = express();
+internal.use(express.json({ limit: "64kb" }));
+internal.post("/internal/canon/forget", async (req, res) => {
+  const ids = req.body && req.body.media_ids;
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500) {
+    return res.status(400).json({ error: "media_ids must be a list of 1 to 500 local media ids", fix: "send {\"media_ids\": [\"<id>\", ...]}" });
+  }
+  const keys = [];
+  const refused = [];
+  for (const id of ids) {
+    const k = forgetKeysFor(id);
+    if (k) keys.push(...k);
+    else refused.push(String(id).slice(0, 80));
+  }
+  if (refused.length) return res.status(400).json({ error: `not media ids: ${refused.join(", ")}`, fix: "send the id part of mxc://<server>/<id>" });
+  try {
+    await cacheDel(...keys);
+  } catch (err) {
+    console.error(`[canon-forget] could not forget ${ids.length} media id(s): ${err.message}`);
+    return res.status(503).json({ error: "the cache could not be reached, so nothing was forgotten", fix: "retry; the cached entries expire on their own within a day" });
+  }
+  console.log(`[canon-forget] forgot ${ids.length} media id(s)`);
+  return res.json({ forgotten: ids.length });
+});
+internal.listen(INTERNAL_PORT, () => console.log(`fourier-auth internal door on ${INTERNAL_PORT} (docker networks only)`));
 
 app.listen(PORT, () => {
   console.log(`fourier-auth listening on port ${PORT}`);

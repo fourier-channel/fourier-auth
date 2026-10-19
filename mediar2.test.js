@@ -405,3 +405,18 @@ test("localMd5s: canon unreachable throws CANON_UNAVAILABLE -- the md5 cannot be
     (err) => err instanceof OriginalUnavailable && err.code === "CANON_UNAVAILABLE",
   );
 });
+
+test("forgetKeysFor: the three per-media-id cache keys, and nothing for a non-id", () => {
+  const { forgetKeysFor } = require("./mediar2");
+  assert.deepEqual(forgetKeysFor("AbCd_-12"), ["canonidx:AbCd_-12", "canonidx-none:AbCd_-12", "thumbkeys:local:AbCd_-12"]);
+  assert.equal(forgetKeysFor("../etc"), null);
+  assert.equal(forgetKeysFor(""), null);
+  assert.equal(forgetKeysFor("a b"), null);
+  assert.equal(forgetKeysFor("x*"), null);
+});
+
+test("forgetKeysFor names exactly the per-media-id keys the gate writes", () => {
+  const src = require("fs").readFileSync(require("path").join(__dirname, "mediar2.js"), "utf8");
+  const written = [...src.matchAll(/`([a-z-]+):\$\{(?:isLocal \? "local" : serverName\}:\$\{)?mediaId\}`/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(written)].sort(), ["canonidx", "canonidx-none", "thumbkeys"]);
+});
