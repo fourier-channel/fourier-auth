@@ -35,6 +35,11 @@ const { createSampleGate, parseSampleGateConfig } = require("./sample-gate");
 // closes the console -- never the service, which also gates every picture.
 const sampleGateConfig = parseSampleGateConfig(process.env);
 const sampleGate = createSampleGate({ config: sampleGateConfig, readRoom: queryRoomGateState });
+// The operator's board at 41chan.net/horizon/ (operator ruling 2026-10-25;
+// operator-gate.js). Same contract: a broken config closes the board, not us.
+const { createOperatorGate, parseOperatorGateConfig } = require("./operator-gate");
+const operatorGateConfig = parseOperatorGateConfig(process.env);
+const operatorGate = createOperatorGate({ config: operatorGateConfig });
 // A viewer's rooms, for the booru's gate 3 for posts (GATE3_CONTRACTS.md A1;
 // rooms-gate.js): GET /verify?gate=rooms, answered for the session's own MXID.
 const { createRoomsGate } = require("./rooms-gate");
@@ -257,6 +262,13 @@ app.get("/healthz", async (req, res) => {
         : detail ? `${sampleGateConfig.room} at level ${sampleGateConfig.level}` : "configured",
     },
     {
+      id: "operator-gate",
+      label: "operator's board gate configured",
+      level: operatorGateConfig.ok ? "green" : "red",
+      detail: !operatorGateConfig.ok ? operatorGateConfig.problem
+        : detail ? operatorGateConfig.mxids.join(", ") : "configured",
+    },
+    {
       id: "synapse-schema",
       label: "Synapse indexes and grants the gate needs",
       // Unchecked (just booted, or the database did not answer the check) is
@@ -396,7 +408,8 @@ app.get("/verify", makeVerifyHandler({
   // GET /verify?gate=sample: the sampling console's door (sample-gate.js).
   // GET /verify?gate=rooms: the viewer's joined rooms, as JSON, for the
   // booru's gate 3 for posts (rooms-gate.js). Its session-store 503 is JSON too.
-  gates: { sample: sampleGate.answer, rooms: roomsGate },
+  // GET /verify?gate=operator: the operator's board (operator-gate.js).
+  gates: { sample: sampleGate.answer, rooms: roomsGate, operator: operatorGate.answer },
   // The session bar's evidence: real expiry from Redis PTTL (there is no
   // refresh -- sessions live a fixed TTL, so no refresh_at is published and
   // none is invented) plus the user's previous session, recorded at logout.
@@ -798,6 +811,11 @@ app.listen(PORT, () => {
     console.log(`[sample-gate] /verify?gate=sample opens at power level ${sampleGateConfig.level} in ${sampleGateConfig.room}`);
   } else {
     console.error(`[sample-gate] NOT CONFIGURED -- the sampling console answers 503 to everyone. ${sampleGateConfig.problem}`);
+  }
+  if (operatorGateConfig.ok) {
+    console.log(`[operator-gate] /verify?gate=operator opens to ${operatorGateConfig.mxids.length} account(s)`);
+  } else {
+    console.error(`[operator-gate] NOT CONFIGURED -- the operator's board answers 503 to everyone. ${operatorGateConfig.problem}`);
   }
   // Say at boot whether the media gate's indexes exist, rather than letting a
   // fresh database announce it as 5-second thumbnails and 403s.

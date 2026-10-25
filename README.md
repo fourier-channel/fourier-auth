@@ -206,6 +206,14 @@ boot and that check say why. From a flag to a refusal: about 90 s for a
 grant, about 3 min at the Matrix door (30 s poll plus the Worker's 150 s
 Matrix decision cache).
 
+`OPERATOR_GATE_MXIDS`: the operator's board door, `GET /verify?gate=operator`
+(operator ruling 2026-10-25), comma-separated Matrix ids. A viewer whose
+`fourier_session` names one of them passes with `X-Fourier-Identity`; not
+signed in, or anyone else, is a 403 with its remedy; unset or malformed is a
+503 for everyone, reported at boot and on `/healthz` (`operator-gate`). Caddy
+asks it for `https://41chan.net/horizon/`, and the queue door on vesper checks
+the identity again against its own roster.
+
 `SAMPLE_GATE_ROOM` and `SAMPLE_GATE_LEVEL`: the sampling console's door,
 `GET /verify?gate=sample` (operator ruling 2026-10-09). A viewer whose
 `fourier_session` names a Matrix user JOINED to that room at or above that
@@ -324,6 +332,10 @@ times when a module was added.
   qualifying viewer (see `SAMPLE_GATE_ROOM`), 403 with its remedy
   otherwise, 503 when the config, the session store or Synapse's database
   cannot answer. An unknown `gate=` is a 400, never the bare route's 204.
+- `GET /verify?gate=operator` -- the operator's board door, closed the same
+  way: 204 with `X-Fourier-Identity` for an account in `OPERATOR_GATE_MXIDS`,
+  403 with its remedy otherwise, 503 when the config or the session store
+  cannot answer.
   Every refusal is a small HTML page whose one link is the way back,
   `https://booru.41chan.net/`, with no target, so inside Technetium's panel it
   repaints the same frame and never nests one surface in another.

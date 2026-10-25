@@ -56,6 +56,10 @@ services:
       # malformed closes the console (503), never the service. sample-gate.js.
       - SAMPLE_GATE_ROOM=!GgCWjVAknxPyofQtCQ:41chan.net
       - SAMPLE_GATE_LEVEL=70
+      # The operator's board at https://41chan.net/horizon/ opens to these
+      # Matrix ids only (operator ruling 2026-10-25; OPERATOR_CONTROL_PANEL S8).
+      # Unset or malformed closes the board (503), never the service. operator-gate.js.
+      - OPERATOR_GATE_MXIDS=@saber:41chan.net
       # Gate 3 for posts: the placements reader (placements-reader.js). Off
       # until the booru's receiving mode is deployed and
       # tools/ensure-synapse-indexes.sh has built events_gate3_placement_idx
