@@ -211,8 +211,9 @@ Matrix decision cache).
 `fourier_session` names one of them passes with `X-Fourier-Identity`; not
 signed in, or anyone else, is a 403 with its remedy; unset or malformed is a
 503 for everyone, reported at boot and on `/healthz` (`operator-gate`). Caddy
-asks it for `https://41chan.net/horizon/`, and the queue door on vesper checks
-the identity again against its own roster.
+asks it for `https://41chan.net/horizon/console/` (there since 2026-10-29;
+`/horizon/` itself is the public roadmap and asks nothing), and the queue door
+on vesper checks the identity again against its own roster.
 
 `SAMPLE_GATE_ROOM` and `SAMPLE_GATE_LEVEL`: the sampling console's door,
 `GET /verify?gate=sample` (operator ruling 2026-10-09). A viewer whose

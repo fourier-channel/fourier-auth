@@ -56,7 +56,7 @@ services:
       # malformed closes the console (503), never the service. sample-gate.js.
       - SAMPLE_GATE_ROOM=!GgCWjVAknxPyofQtCQ:41chan.net
       - SAMPLE_GATE_LEVEL=70
-      # The operator's board at https://41chan.net/horizon/ opens to these
+      # The operator's console at https://41chan.net/horizon/console/ opens to these
       # Matrix ids only (operator ruling 2026-10-25; OPERATOR_CONTROL_PANEL S8).
       # Unset or malformed closes the board (503), never the service. operator-gate.js.
       - OPERATOR_GATE_MXIDS=@saber:41chan.net

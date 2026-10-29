@@ -4,7 +4,8 @@
 //
 // Operator ruling 2026-10-25 (fourier-basis OPERATOR_CONTROL_PANEL sec 3, S8):
 // the board's queue actions are reached through "fourier-auth sign-in", at
-// https://41chan.net/horizon/. A tailnet-device check cannot work there: every
+// https://41chan.net/horizon/console/ (moved there 2026-10-29; /horizon/ is the
+// public roadmap). A tailnet-device check cannot work there: every
 // node on the tailnet is tagged, so none is the operator's. fourier_session
 // (Domain .41chan.net) reaches the apex, and it names a Matrix user, so the
 // question is "is this one of the listed accounts".

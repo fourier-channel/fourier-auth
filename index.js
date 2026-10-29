@@ -35,8 +35,8 @@ const { createSampleGate, parseSampleGateConfig } = require("./sample-gate");
 // closes the console -- never the service, which also gates every picture.
 const sampleGateConfig = parseSampleGateConfig(process.env);
 const sampleGate = createSampleGate({ config: sampleGateConfig, readRoom: queryRoomGateState });
-// The operator's board at 41chan.net/horizon/ (operator ruling 2026-10-25;
-// operator-gate.js). Same contract: a broken config closes the board, not us.
+// The operator's console at 41chan.net/horizon/console/ (operator ruling
+// 2026-10-25, moved there 2026-10-29; operator-gate.js). Same contract: a broken config closes the board, not us.
 const { createOperatorGate, parseOperatorGateConfig } = require("./operator-gate");
 const operatorGateConfig = parseOperatorGateConfig(process.env);
 const operatorGate = createOperatorGate({ config: operatorGateConfig });
