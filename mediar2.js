@@ -136,6 +136,10 @@ function pickThumbnail(candidates, want, method) {
 // Synapse's renditions of booru-held images are moved to superseded/ by
 // fourier-tunnel (canon.retireSynapseThumbnails). Remote media is unchanged.
 const INDEX_TTL = 24 * 60 * 60; // an index entry is written once and never changes
+// How long the tokenless path remembers that no index exists yet: about the
+// booru's own 20 s for a "hidden" answer (booru-visibility.js TTL.hidden),
+// so an image the tunnel canonicalizes meanwhile is seen within that.
+const NO_INDEX_TTL = 20;
 
 class OriginalUnavailable extends Error {
   // code: "GONE" -- canon says there is no such image (404, permanent).
@@ -173,11 +177,28 @@ async function canonicalOriginalKey(s3, bucket, { mediaId, cache, askCanon }) {
 // canon's index for a local media id, asking canon to make it when there is
 // none. `asked`: whether canon was asked just now. Throws OriginalUnavailable
 // (GONE, WITHHELD, CANON_UNAVAILABLE) exactly as canonicalOriginalKey does.
+//
+// askCanon null: read only an index that already exists, NEVER ask canon (the
+// Matrix door's tokenless path, review 2026-11-01). A request with no token
+// must cost nothing past this read: asking canon is a POST that may run 30 s
+// and makes a real, not-yet-canonical id canonical for whoever named it. No
+// index is then an ordinary miss (GONE), remembered NO_INDEX_TTL under its own
+// key -- never canonidx-none, whose 10 min belongs to booruVariantKey -- so a
+// stranger repeating a made-up id costs no R2 read. The token path does not
+// read that key: it asks canon, as before.
 async function localIndex(s3, bucket, { mediaId, cache, askCanon }) {
   const cacheKey = `canonidx:${mediaId}`;
+  const absentKey = `canonidx-absent:${mediaId}`;
   let idx = cache ? await cache.get(cacheKey).catch(() => null) : null;
+  if (!idx && !askCanon && cache && await cache.get(absentKey).catch(() => null)) {
+    throw new OriginalUnavailable("GONE", `no index for ${mediaId} (remembered), and canon is not asked here`);
+  }
   if (!idx) idx = await readIndex(s3, bucket, mediaId);
   let asked = false;
+  if (!idx && !askCanon) {
+    if (cache) await cache.set(absentKey, true, NO_INDEX_TTL).catch(() => {});
+    throw new OriginalUnavailable("GONE", `no index for ${mediaId}, and canon is not asked here`);
+  }
   if (!idx) {
     try {
       asked = true;
@@ -377,10 +398,11 @@ async function thumbnailOfLastResort(s3, bucket, { mediaId, thumbSize, cache, as
 const MEDIA_ID_RE = /^[A-Za-z0-9_-]{1,255}$/;
 function forgetKeysFor(mediaId) {
   if (!MEDIA_ID_RE.test(String(mediaId || ""))) return null;
-  return [`canonidx:${mediaId}`, `canonidx-none:${mediaId}`, `thumbkeys:local:${mediaId}`];
+  return [`canonidx:${mediaId}`, `canonidx-none:${mediaId}`, `canonidx-absent:${mediaId}`, `thumbkeys:local:${mediaId}`];
 }
 
 module.exports = {
+  MEDIA_ID_RE,
   forgetKeysFor,
   localOriginalKey,
   remoteOriginalKey,

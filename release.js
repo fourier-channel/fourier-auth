@@ -42,7 +42,14 @@ function originalRelease(headers) {
 // Every answer is no-store: the presigned URL is short-lived, so neither the
 // envelope nor the 302 may be cached and replayed stale, and a withheld answer
 // must not be cached into a later edge request's way either.
-function sendRelease(req, res, signedUrl, { edge }) {
+// anonymous: the Matrix door released this to a request with NO token (the
+// tokenless release, operator ruling 2026-11-01; media-route.js). Said only in
+// the edge's envelope, { url, anonymous: true }, so the Worker keeps the allow
+// 60 s like any signed-out one: it cannot tell a dead session's cookie from a
+// live one, and only this gate knows the request went tokenless. A direct
+// caller's answer is unchanged; a 302 carries no flag, and the Worker always
+// asks as a cors fetch, which is never redirected.
+function sendRelease(req, res, signedUrl, { edge, anonymous = false }) {
   res.set("Cache-Control", "no-store");
   if (!edge) {
     return res.json({
@@ -52,7 +59,7 @@ function sendRelease(req, res, signedUrl, { edge }) {
     });
   }
   if (originalRelease(req.headers) === "redirect") return res.redirect(302, signedUrl);
-  return res.json({ url: signedUrl });
+  return res.json(anonymous ? { url: signedUrl, anonymous: true } : { url: signedUrl });
 }
 
 // THE ONE RELEASE MODE. MEDIA_ORIGINAL_RELEASE once also took "proxy" --

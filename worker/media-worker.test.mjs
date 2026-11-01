@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import worker, { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, refusesAnonymous, denialStatus, decisionTtl, booruCookie, MAX_PUB_COOKIES } from "./media-worker.mjs";
+import worker, { saveOptions, extensionFor, parseBooruPath, parseMediaPath, authUrl, resolveUpstream, responseHeaders, deny, corsHeaders, signedOut, denialStatus, decisionTtl, booruCookie, MAX_PUB_COOKIES } from "./media-worker.mjs";
 
 // The Worker cannot be deployed from this box (no Cloudflare token with
 // Workers scope), so its decision logic is tested here instead of being
@@ -229,14 +229,13 @@ test("a listed origin gets credentialed CORS echoed; anyone else keeps the wildc
   assert.equal(deny(403, "M_FORBIDDEN", "no", corsHeaders("https://booru.41chan.net", list)).headers.get("Access-Control-Allow-Origin"), "https://booru.41chan.net");
 });
 
-test("a request with no credential is refused for Matrix media and asked of the gate for booru media", async () => {
+test("a request with no credential is asked of the gate, for booru AND Matrix media", async () => {
   // The published thread is read with no session at all, and the booru's post
   // visibility is the gate for imageboard media (2026-09-18). Refusing before
-  // asking made the same picture 200 at the origin and 401 at the edge.
-  assert.equal(refusesAnonymous(parseMediaPath("/_matrix/client/v1/media/thumbnail/m.example/abc")), true);
-  assert.equal(refusesAnonymous(parseMediaPath("/_matrix/client/v1/media/download/m.example/abc")), true);
-  assert.equal(refusesAnonymous(parseBooruPath("/fourier/booru/" + "a".repeat(32) + ".jpg")), false);
-  // And the gate is asked with NO credential header invented for it.
+  // asking made the same picture 200 at the origin and 401 at the edge. Matrix
+  // media likewise since 2026-11-01: a public gallery's grant lets a
+  // signed-out visitor's Matrix post through gate 3 (media-route.js).
+  // The gate is asked with NO credential header invented for it.
   let seen = null;
   const fake = async (_u, init) => { seen = init.headers; return { status: 200, json: async () => ({ url: "https://r2/x" }) }; };
   const d = await resolveUpstream(fake, "u", { authorization: null, cookie: null });
@@ -248,6 +247,115 @@ test("a request with no credential is refused for Matrix media and asked of the 
   assert.deepEqual(await resolveUpstream(refusing, "u", { authorization: null, cookie: null }), { ok: false, status: 401 });
 });
 
+test("signed out: no Authorization and no fourier_session -- other cookies do not sign anyone in", () => {
+  assert.equal(signedOut(null, null), true);
+  assert.equal(signedOut(null, "cf_clearance=z; theme=dark"), true);
+  assert.equal(signedOut(null, "theme=dark; fourier_session=s"), false);
+  assert.equal(signedOut(null, "fourier_session=s"), false);
+  assert.equal(signedOut(null, "not_fourier_session=s"), true);
+  assert.equal(signedOut("Bearer t", null), false);
+});
+
+// The Matrix door's tokenless release (operator ruling 2026-11-01), through the
+// whole fetch handler, with a cache that keeps what it is given.
+function tokenlessRig() {
+  const puts = [];
+  const gateCalls = [];
+  const store = new Map();
+  const rig = { puts, gateCalls, gateSays: { status: 401, body: { error: "no valid session or bearer token" } } };
+  globalThis.caches = { default: {
+    match: async (req) => store.get(typeof req === "string" ? req : req.url),
+    put: async (req, res) => { puts.push({ url: req.url, cc: res.headers.get("Cache-Control") }); store.set(req.url, new Response(await res.clone().text(), res)); },
+  } };
+  rig.realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.startsWith("https://mxc.example/")) {
+      gateCalls.push({ url, headers: init.headers });
+      return new Response(JSON.stringify(rig.gateSays.body), { status: rig.gateSays.status });
+    }
+    return new Response("PNGBYTES", { status: 200, headers: { "Content-Type": "image/png" } });
+  };
+  rig.ask = async (id, headers = {}) => {
+    const waits = [];
+    const req = new Request(`https://matrix.41chan.net/_matrix/client/v1/media/download/41chan.net/${id}`, { headers });
+    const r = await worker.fetch(req, { FOURIER_AUTH_BASE: "https://mxc.example", MEDIA_EDGE_SECRET: "k" }, { waitUntil: (p) => waits.push(p) });
+    await Promise.all(waits);
+    return r;
+  };
+  rig.decisionTtls = () => puts.filter((p) => p.url.startsWith("https://authz.fourier.internal/")).map((p) => p.cc);
+  rig.done = () => { globalThis.fetch = rig.realFetch; delete globalThis.caches; };
+  return rig;
+}
+
+// A signed-out request is ASKED of the gate (before, this Worker answered it
+// 401 without asking). The gate's refusal reaches the client as the same
+// M_MISSING_TOKEN this Worker gave before, and is kept 20 s (review
+// 2026-11-01): a stranger re-asking for one id waits here, never at the
+// origin, which would otherwise pay an index read per ask.
+test("TOKENLESS: a signed-out Matrix request is asked of the gate; its refusal is the old M_MISSING_TOKEN, kept 20 s", async () => {
+  const rig = tokenlessRig();
+  try {
+    const refused = await rig.ask("abc");
+    assert.equal(rig.gateCalls.length, 1, "the gate was asked");
+    assert.equal(rig.gateCalls[0].headers.Authorization, undefined);
+    assert.equal(rig.gateCalls[0].headers.Cookie, undefined);
+    assert.equal(refused.status, 401);
+    assert.deepEqual(await refused.json(), { errcode: "M_MISSING_TOKEN", error: "Missing access token" });
+    assert.deepEqual(rig.decisionTtls(), ["max-age=20"]);
+    const again = await rig.ask("abc");
+    assert.equal(rig.gateCalls.length, 1, "the repeat waited at the edge");
+    assert.equal(again.status, 401);
+    assert.deepEqual(await again.json(), { errcode: "M_MISSING_TOKEN", error: "Missing access token" });
+    // A signed-in reader's 401 is the gate's own, and never kept.
+    const bearerRefused = await rig.ask("abc", { Authorization: "Bearer dead" });
+    assert.deepEqual(await bearerRefused.json(), { errcode: "M_UNAUTHORIZED", error: "Not authorized for this media" });
+    assert.deepEqual(rig.decisionTtls(), ["max-age=20"]);
+    // Nor a signed-out 403 or 404: only the 401 that means "no".
+    rig.gateSays = { status: 404, body: {} };
+    await rig.ask("gone");
+    assert.deepEqual(rig.decisionTtls(), ["max-age=20"]);
+  } finally {
+    rig.done();
+  }
+});
+
+test("TOKENLESS: a signed-out allow lives 60 s, a signed-in reader's 150 s", async () => {
+  const rig = tokenlessRig();
+  try {
+    rig.gateSays = { status: 200, body: { url: "https://r2.example/media/41chan.net/abc?X-Amz-Signature=s", anonymous: true } };
+    const released = await rig.ask("abc", { Cookie: "theme=dark" });
+    assert.equal(released.status, 200);
+    assert.equal(await released.text(), "PNGBYTES");
+    rig.gateSays = { status: 200, body: { url: "https://r2.example/media/41chan.net/def?X-Amz-Signature=s" } };
+    await rig.ask("def", { Cookie: "fourier_session=s" });
+    assert.deepEqual(rig.decisionTtls(), ["max-age=60", "max-age=150"]);
+  } finally {
+    rig.done();
+  }
+});
+
+// The Worker sees a fourier_session cookie; only the gate knows its session
+// is dead and went tokenless. The gate says so ({ url, anonymous: true }) and
+// that allow is kept 60 s like any signed-out one (review 2026-11-01).
+test("TOKENLESS: an allow the gate marks anonymous is kept 60 s even when the request carried a session cookie", async () => {
+  const rig = tokenlessRig();
+  try {
+    rig.gateSays = { status: 200, body: { url: "https://r2.example/media/41chan.net/abc?X-Amz-Signature=s", anonymous: true } };
+    const res = await rig.ask("abc", { Cookie: "fourier_session=dead" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(rig.decisionTtls(), ["max-age=60"]);
+  } finally {
+    rig.done();
+  }
+});
+
+test("resolveUpstream carries the gate's anonymous flag, and only a true one", async () => {
+  const answer = (body) => async () => ({ status: 200, json: async () => body });
+  assert.deepEqual(await resolveUpstream(answer({ url: "https://r2/x", anonymous: true }), "u", {}), { ok: true, url: "https://r2/x", anonymous: true });
+  assert.deepEqual(await resolveUpstream(answer({ url: "https://r2/x" }), "u", {}), { ok: true, url: "https://r2/x" });
+  assert.deepEqual(await resolveUpstream(answer({ url: "https://r2/x", anonymous: "yes" }), "u", {}), { ok: true, url: "https://r2/x" });
+});
 
 // -- leak audit 2026-10-01 ---------------------------------------------------
 
@@ -269,12 +377,15 @@ test("F-G2: a gate that withholds the URL from this Worker is a 502, named as wi
   assert.deepEqual(await resolveUpstream(fake, "u", { cookie: "a=b" }, { secret: "wrong" }), { ok: false, status: 502, withheld: true });
 });
 
-// 150 s for Matrix media (2026-10-12): with fourier-auth's 30 s quarantine
-// poll, a just-flagged or just-jailed Matrix image stops within jail's ~3 min.
-test("F-G1: a booru allow lives 60 s at the edge, a Matrix allow 150 s", () => {
+// 60 s for a signed-out Matrix allow (2026-11-01): it carries the booru's
+// anonymous visibility answer, so it is bounded like a booru allow.
+test("F-G1: a booru allow lives 60 s at the edge, a Matrix allow 150 s, a signed-out Matrix allow 60 s", () => {
   assert.equal(decisionTtl("booru"), 60);
   assert.equal(decisionTtl("download"), 150);
   assert.equal(decisionTtl("thumbnail"), 150);
+  assert.equal(decisionTtl("download", { signedOut: true }), 60);
+  assert.equal(decisionTtl("thumbnail", { signedOut: true }), 60);
+  assert.equal(decisionTtl("booru", { signedOut: true }), 60);
 });
 
 // The whole fetch handler, with Cloudflare's globals faked: what the GATE is

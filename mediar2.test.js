@@ -406,9 +406,41 @@ test("localMd5s: canon unreachable throws CANON_UNAVAILABLE -- the md5 cannot be
   );
 });
 
-test("forgetKeysFor: the three per-media-id cache keys, and nothing for a non-id", () => {
+// THE TOKENLESS PATH'S MD5S (review 2026-11-01; media-route.js): askCanon
+// null reads only an index that already exists. A request with no token must
+// cost nothing past that read -- never a POST to canon, which may run 30 s and
+// make a real, not-yet-canonical id canonical for a stranger. No index is an
+// ordinary miss (GONE, so []), remembered 20 s so a repeat costs no R2 read.
+test("localMd5s without canon: an existing index answers, and canon is never asked", async () => {
+  const s3 = fakeS3({ [IDX]: { kind: "canonical", key: ONE, md5: MD5, raw_md5: RAW } });
+  assert.deepEqual(await localMd5s(s3, "b", { mediaId: MEDIA, cache: memCache(), askCanon: null }), [MD5, RAW]);
+});
+
+test("localMd5s without canon: no index is [] (a plain miss), remembered ~20 s so a repeat reads nothing", async () => {
+  const s3 = fakeS3({});
+  const ttls = {};
+  const m = new Map();
+  const cache = { get: async (k) => m.get(k) ?? null, set: async (k, v, ttl) => { m.set(k, v); ttls[k] = ttl; } };
+  assert.deepEqual(await localMd5s(s3, "b", { mediaId: MEDIA, cache, askCanon: null }), []);
+  assert.equal(s3.asked.length, 1);
+  assert.equal(ttls[`canonidx-absent:${MEDIA}`], 20);
+  assert.deepEqual(await localMd5s(s3, "b", { mediaId: MEDIA, cache, askCanon: null }), []);
+  assert.equal(s3.asked.length, 1, "the remembered miss answered");
+  // The token path ignores that miss: it asks canon, as before.
+  let asked = 0;
+  const out = await localMd5s(s3, "b", { mediaId: MEDIA, cache, askCanon: async () => { asked++; return { kind: "canonical", key: ONE, md5: MD5 }; } });
+  assert.deepEqual(out, [MD5]);
+  assert.equal(asked, 1);
+});
+
+test("localMd5s without canon: R2 failing still THROWS -- an unreadable index is not a miss", async () => {
+  const s3 = { asked: [], async send() { throw Object.assign(new Error("SlowDown"), { name: "SlowDown" }); } };
+  await assert.rejects(() => localMd5s(s3, "b", { mediaId: MEDIA, cache: memCache(), askCanon: null }), /SlowDown/);
+});
+
+test("forgetKeysFor: the four per-media-id cache keys, and nothing for a non-id", () => {
   const { forgetKeysFor } = require("./mediar2");
-  assert.deepEqual(forgetKeysFor("AbCd_-12"), ["canonidx:AbCd_-12", "canonidx-none:AbCd_-12", "thumbkeys:local:AbCd_-12"]);
+  assert.deepEqual(forgetKeysFor("AbCd_-12"), ["canonidx:AbCd_-12", "canonidx-none:AbCd_-12", "canonidx-absent:AbCd_-12", "thumbkeys:local:AbCd_-12"]);
   assert.equal(forgetKeysFor("../etc"), null);
   assert.equal(forgetKeysFor(""), null);
   assert.equal(forgetKeysFor("a b"), null);
@@ -418,5 +450,5 @@ test("forgetKeysFor: the three per-media-id cache keys, and nothing for a non-id
 test("forgetKeysFor names exactly the per-media-id keys the gate writes", () => {
   const src = require("fs").readFileSync(require("path").join(__dirname, "mediar2.js"), "utf8");
   const written = [...src.matchAll(/`([a-z-]+):\$\{(?:isLocal \? "local" : serverName\}:\$\{)?mediaId\}`/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(written)].sort(), ["canonidx", "canonidx-none", "thumbkeys"]);
+  assert.deepEqual([...new Set(written)].sort(), ["canonidx", "canonidx-absent", "canonidx-none", "thumbkeys"]);
 });

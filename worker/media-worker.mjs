@@ -164,8 +164,25 @@ export async function resolveUpstream(fetchImpl, url, credentials, edge = {}) {
   const body = await res.json().catch(() => null);
   if (body && body.released === false) return { ok: false, status: 502, withheld: true };
   if (!body || typeof body.url !== "string") return { ok: false, status: 502 };
-  return { ok: true, url: body.url };
+  // The gate says when a release is a tokenless one (fourier-auth release.js,
+  // review 2026-11-01): only a literal true counts, and it is all that is kept.
+  return { ok: true, url: body.url, ...(body.anonymous === true ? { anonymous: true } : {}) };
 }
+
+/** The gate's 503 says "try again in 2 s"; the edge keeps that refusal as long. */
+export const RETRY_AFTER_S = 2;
+
+/**
+ * A SIGNED-OUT Matrix 401 is kept 20 s (review 2026-11-01). Since the
+ * tokenless release every anonymous Matrix ask reaches the gate, which reads
+ * an R2 index to answer it; repeats of one id are answered here instead. 20 s
+ * matches the gate's own cached "no" (booru-visibility TTL.hidden, mediar2.js
+ * NO_INDEX_TTL), so once the booru starts answering yes for an image (a
+ * signed-out visitor was shown it on a public gallery) a viewer refused just
+ * before waits ~40 s at worst. Only a request with no credential at all
+ * is kept: a token holder's refusal is about that holder and is never cached.
+ */
+export const SIGNED_OUT_REFUSAL_S = 20;
 
 /**
  * How long an ALLOW is reused at the edge, by kind.
@@ -182,12 +199,18 @@ export async function resolveUpstream(fetchImpl, url, credentials, edge = {}) {
  * only after an allow. So the worst case for a just-jailed image is ~3 min,
  * not ~6 -- and the cost is one more round trip per reader per image per
  * minute, which the gate answers from Redis.
+ *
+ * A SIGNED-OUT Matrix allow: 60 s, like a booru allow and for the same reason.
+ * Since the tokenless release (operator ruling 2026-11-01; fourier-auth
+ * media-route.js) it carries the booru's anonymous visibility answer -- a
+ * public gallery's grant, which is temporary -- so a revoked grant stops
+ * within the gate's 120 s positive cache plus this, ~3 min. "Signed out" is
+ * what the GATE says (decision.anonymous), not only what the headers suggest:
+ * a dead or empty session cookie or a non-Bearer scheme look signed in here
+ * but are released tokenless there.
  */
-/** The gate's 503 says "try again in 2 s"; the edge keeps that refusal as long. */
-export const RETRY_AFTER_S = 2;
-
-export function decisionTtl(kind) {
-  return kind === "booru" ? 60 : 150;
+export function decisionTtl(kind, { signedOut = false } = {}) {
+  return kind === "booru" || signedOut ? 60 : 150;
 }
 
 /** The file extension a saved copy of this media type should carry. */
@@ -300,24 +323,31 @@ export function saveOptions(parsed, searchParams) {
 }
 
 /**
- * Whether a request carrying NO credential is refused here, before the gate
- * is asked, or handed to the gate to decide.
+ * Whether a request is SIGNED OUT: no Authorization header and no
+ * fourier_session cookie (other cookies -- cf_clearance, a theme -- sign
+ * nobody in). A signed-out request is ASKED of the gate like any other, for
+ * every kind of media; this only decides how long its allow lives
+ * (decisionTtl) and how a Matrix refusal is worded to it.
  *
- * Matrix media: refused. There is no anonymous Matrix identity, and asking
- * fourier-auth would only cost a round trip to hear the same 401.
+ * Booru media has always been asked: imageboard media is gated by the
+ * booru's own post visibility, not by a session (operator ruling 2026-09-18:
+ * "fourier-auth is uninvolved with archived media from imageboards";
+ * BOORU_MEDIA_REQUIRE_SESSION is 0 on the gate). A published thread is read by
+ * people with no session at all, and the same picture answered 200 at the
+ * origin and 401 here, because this Worker refused before the gate could say
+ * yes. Discord's unfurler, a fresh browser and a plain curl all arrive with no
+ * cookie; the gate is the one rule about what they may see, and it is asked.
  *
- * Booru media: ASKED. Imageboard media is gated by the booru's own post
- * visibility, not by a session (operator ruling 2026-09-18: "fourier-auth is
- * uninvolved with archived media from imageboards"; BOORU_MEDIA_REQUIRE_SESSION
- * is 0 on the gate). A published thread is read by people with no session at
- * all, and the same picture answered 200 at the origin and 401 here, because
- * this line refused before the gate could say yes. Discord's unfurler, a fresh
- * browser and a plain curl all arrive with no cookie; the gate is the one
- * rule about what they may see, and it is asked. Its refusals still pass
- * through unchanged.
+ * Matrix media is asked too since 2026-11-01. Operator ruling: "Images a user
+ * places on their public gallery is considered a whitelist for those posts
+ * that lets them through Gate 3 (specifically). Just as with all other
+ * signed-out content, the authorizations are temporary." Until then this
+ * Worker answered every credential-less Matrix request 401 without asking
+ * ("there is no anonymous Matrix identity"), which would have refused every
+ * galleried picture to the signed-out visitor the gallery was shown to.
  */
-export function refusesAnonymous(parsed) {
-  return parsed.kind !== "booru";
+export function signedOut(authorization, cookie) {
+  return !authorization && !/(?:^|;\s*)fourier_session=/.test(cookie || "");
 }
 
 /**
@@ -400,9 +430,7 @@ export default {
     // Booru media: only the cookies the gate reads, so the decision cache is
     // keyed by exactly what decides the answer -- see booruCookie.
     const cookie = parsed.kind === "booru" ? booruCookie(rawCookie, request.headers.get("Referer")) : rawCookie;
-    if (!authorization && !cookie && refusesAnonymous(parsed)) {
-      return deny(401, "M_MISSING_TOKEN", "Missing access token", cors);
-    }
+    const anonymous = signedOut(authorization, cookie);
 
     // Cache the DECISION at the edge, not just the bytes.
     //
@@ -421,17 +449,20 @@ export default {
     // mints for 300s, so a TTL of at most 240s guarantees at least 60s of
     // life left on any URL served from cache. Handing out a credential about
     // to expire is the failure the old client's REUSE_MARGIN_MS existed to
-    // avoid. The TTLs themselves (150 s Matrix, 60 s booru) are bounds on how
-    // long a just-hidden image keeps serving -- see decisionTtl.
+    // avoid. The TTLs themselves (150 s Matrix, 60 s booru and signed-out
+    // Matrix) are bounds on how long a just-hidden image keeps serving -- see
+    // decisionTtl.
     //
-    // ALLOWS, and one kind of refusal. A cached denial would lock a user out of
+    // ALLOWS, and two kinds of refusal. A cached denial would lock a user out of
     // a room they just joined for the rest of the window, and denials are
     // cheap to re-ask. The exception is the gate's 503 ("could not decide
     // right now", Retry-After 2): it is kept for exactly its Retry-After, so a
     // burst of retries -- the booru's error card re-probes every failed image
     // -- waits here instead of piling onto a gate that is already behind
     // (2026-10-19: 79 refusals in three minutes while the booru was slow). It
-    // is still a refusal, so this fails closed; it only spares the gate.
+    // is still a refusal, so this fails closed; it only spares the gate. The
+    // other is a signed-out Matrix 401, kept SIGNED_OUT_REFUSAL_S: there is no
+    // room to join without signing in, and signing in changes the cache key.
     const authzUrl = authUrl(env.FOURIER_AUTH_BASE, parsed, url.searchParams);
     const cache = caches.default;
     const authzKey = await decisionKey(authzUrl, authorization || cookie);
@@ -448,7 +479,10 @@ export default {
       decision = await resolveUpstream(fetch, authzUrl, { authorization, cookie },
         { secret: env.MEDIA_EDGE_SECRET, clientIp: request.headers.get("CF-Connecting-IP") });
       if (decision.withheld) console.error("the gate WITHHELD the media URL: MEDIA_EDGE_SECRET here does not match the gate's");
-      const keep = decision.ok ? decisionTtl(parsed.kind) : decision.status === 503 ? RETRY_AFTER_S : 0;
+      const keep = decision.ok ? decisionTtl(parsed.kind, { signedOut: anonymous || decision.anonymous === true })
+        : decision.status === 503 ? RETRY_AFTER_S
+        : decision.status === 401 && anonymous && parsed.kind !== "booru" ? SIGNED_OUT_REFUSAL_S
+        : 0;
       if (keep) {
         ctx.waitUntil(cache.put(authzKey, new Response(JSON.stringify(decision), {
           headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${keep}` },
@@ -477,6 +511,11 @@ export default {
       // is an outage, and an outage that hides itself by leaking bytes is the
       // exact failure mode this whole system has been unpicking all week.
       const status = denialStatus(decision.status);
+      // A signed-out Matrix request the gate refuses hears what it heard before
+      // the gate was asked (2026-11-01): Matrix's own "you sent no token".
+      if (status === 401 && anonymous && parsed.kind !== "booru") {
+        return deny(401, "M_MISSING_TOKEN", "Missing access token", cors);
+      }
       const r = deny(status, DENIAL[status].errcode, DENIAL[status].error, cors);
       // The gate's 503 is "this image is being made into its one file": a
       // retry in a moment succeeds, and the client is told so.

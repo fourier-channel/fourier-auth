@@ -71,6 +71,18 @@
 //                          past its bound), so the Matrix door answered 503 and
 //                          grants were refused (fail closed). RED, with the fix.
 //
+// The tokenless release (operator ruling 2026-11-01; media-route.js) adds two,
+// counted only -- neither is a check or moves the lamp:
+//
+//   anonymous_matrix_releases  a local Matrix image released at the Matrix door
+//                          to a request with no token, because the booru's
+//                          anonymous ask said a signed-out viewer may see a
+//                          post holding it (a public gallery's fresh grant).
+//   anonymous_matrix_refusals  a tokenless request for a local image the booru
+//                          said no to, answered the old 401. The gate working.
+//
+// The booru unreachable on that path is booru_unavailable, RED as above.
+//
 // WHO SEES THE DETAIL (F-G5). The "last:" strings name mxc ids and Matrix user
 // ids. health({ detail: false }) leaves them out -- levels, labels and counts
 // only -- and that is what a public caller of /healthz gets.
@@ -81,7 +93,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [], quarantine_refused: [], quarantine_unavailable: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [], quarantine_refused: [], quarantine_unavailable: [], anonymous_matrix_releases: [], anonymous_matrix_refusals: [] };
     this.last = {};
   }
 
@@ -110,6 +122,8 @@ class GateSignals {
   publicationGranted(detail) { this.#note("publication_grants", detail); }
   quarantineRefused(detail) { this.#note("quarantine_refused", detail); }
   quarantineUnavailable(detail) { this.#note("quarantine_unavailable", detail); }
+  anonymousMatrixReleased(detail) { this.#note("anonymous_matrix_releases", detail); }
+  anonymousMatrixRefused(detail) { this.#note("anonymous_matrix_refusals", detail); }
 
   counts(at = this.now()) {
     const out = {};

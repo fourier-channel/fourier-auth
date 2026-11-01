@@ -19,7 +19,7 @@ const tokenSource = makeTokenSource({
     error: (m) => { console.error(m); signals.refreshFailed(m.replace(/^\[session\] /, "")); },
   },
 });
-const { decideMediaAccess, MediaAuthUnavailable, verifySynapseIndexes, verifySynapseGrants, whoamiUser, queryRoomGateState, queryJoinedRoomsOf } = require("./mediaauth");
+const { decideMediaAccess, verifySynapseIndexes, verifySynapseGrants, whoamiUser, queryRoomGateState, queryJoinedRoomsOf } = require("./mediaauth");
 const { exchangeCorsHeaders, bearerToken } = require("./exchange");
 // Wiring, asserted at boot: the first deploy of /exchange answered every
 // request 503 "whoamiUser is not a function" because the helper had been
@@ -47,10 +47,11 @@ const { sendRelease, releaseModeFromEnv } = require("./release");
 const { isEdgeCaller, edgeClientIp, healthDetailAllowed } = require("./callers");
 const { createBooruVisibility, booruPostsClient } = require("./booru-visibility");
 const { makeBooruHandler } = require("./booru-route");
+const { makeMediaHandler } = require("./media-route");
 const { createPublicationGrants, samplingPublicationClient, pubHashes } = require("./publication-grants");
 const crypto = require("crypto");
-const { resolveR2Key, localMd5s, canonClient, OriginalUnavailable, forgetKeysFor } = require("./mediar2");
-const { booruQuarantineClient, createQuarantine, QuarantineUnavailable, matrixDoorVerdict, quarantineConfigProblem } = require("./booru-quarantine");
+const { resolveR2Key, localMd5s, canonClient, forgetKeysFor } = require("./mediar2");
+const { booruQuarantineClient, createQuarantine, quarantineConfigProblem } = require("./booru-quarantine");
 // fourier-tunnel's canon.js, over the docker network: it makes a Matrix image into
 // the ONE stripped file the gate then serves (see mediar2.js canonicalOriginalKey).
 const askCanon = canonClient({ axios, baseUrl: process.env.CANON_URL || "http://fourier-tunnel:8011" });
@@ -548,229 +549,34 @@ app.get("/booru/:file", makeBooruHandler({
   log: console,
 }));
 
-// releases local originals from R2 (content-negotiated: a 302 to a presigned URL
-// for native browser loads, or a JSON { url } envelope for fetch()/XHR callers --
-// see release.js) OR streams from Synapse (thumbnails, and remote-server
-// originals). Either way the bytes go client <- R2/Synapse, origin out of the path.
-// Thumbnails: ?w=<px>&h=<px> (snapped to ALLOWED_THUMB_SIZES), or legacy ?thumb=1 (320).
-app.get("/media/:serverName/:mediaId", async (req, res) => {
-  const { serverName, mediaId } = req.params;
-
-  let thumbSize = null;
-  if (req.query.w || req.query.h) {
-    const want = parseInt(req.query.w || req.query.h, 10) || 320;
-    thumbSize = ALLOWED_THUMB_SIZES.reduce((a, b) =>
-      Math.abs(b - want) < Math.abs(a - want) ? b : a);
-  } else if (req.query.thumb === "1") {
-    thumbSize = 320;
-  }
-
-  applyMediaCors(req, res);
-
-  // Token broker, two ways in (Bearer header wins when present):
-  //   Authorization: Bearer <MAS token> -> first-party clients (Technetium)
-  //     that already hold the user's MAS token; header-based, so no cookie /
-  //     SameSite friction cross-origin.
-  //   fourier_session cookie             -> the booru's same-site path.
-  // Synapse remains the final authority on validity: an invalid token earns a
-  // 401 from the upstream media endpoint, which we pass straight through.
-  let token = null;
-  let viaSession = false;
-  const authz = req.headers.authorization || "";
-  if (authz.startsWith("Bearer ")) {
-    token = authz.slice(7).trim();
-  } else {
-    const sid = req.cookies[COOKIE_NAME];
-    const session = await getSession(sid);
-    // Through the token source, never session.matrixToken directly: the
-    // session outlives its token by a day, and this is where it is renewed.
-    if (session) { token = await tokenSource.freshToken(sid, session); viaSession = true; }
-  }
-  if (!token) {
-    return res.status(401).json({ error: "no valid session or bearer token" });
-  }
-
-  // Per-room authorization: Synapse authenticates the token but does NOT enforce
-  // that the user can see the room this mxc lives in (MSC3916 scoping). Enforce
-  // it here -- allow only if the token's owner is joined to a room containing
-  // this media. Fail closed. Applies to BOTH bearer (client) and cookie (booru).
-  // ?room_id= is the client saying which room it is rendering. It only ever
-  // WIDENS access for media the server cannot see into (encrypted rooms), and
-  // only when the caller is genuinely joined to the room named -- see
-  // mediaauth.js for why knowing the mxc is itself evidence of membership.
-  const roomId = typeof req.query.room_id === "string" ? req.query.room_id : undefined;
-  let decision;
-  try {
-    decision = await decideMediaAccess(token, serverName, mediaId, { roomId });
-  } catch (err) {
-    if (!(err instanceof MediaAuthUnavailable)) throw err;
-    // The gate could not be consulted. That is not "forbidden": the edge
-    // renders 503 as an uncached 502 and the client retries with backoff.
-    // Before this, a pool timeout was answered 403 -- final, and wrong -- 105
-    // times a day (2026-09-05).
-    console.error("[media] authorization unavailable:", err.message);
-    res.set("Retry-After", "1");
-    return res.status(503).json({ error: "media authorization temporarily unavailable" });
-  }
-  if (!decision.allowed) {
-    // A reader who holds a session and is refused goes to the lamp WITH the
-    // reason the gate refused: a dead token is red, an image in no room is
-    // amber, a reader outside the image's room is the gate working. The
-    // answer to the reader is the same 403 in every case -- the reason is for
-    // the lamp, never the response, which must not say why.
-    if (viaSession) signals.sessionRefused(403, `/media/${serverName}/${mediaId}`, decision.reason);
-    return res.status(403).json({ error: "not authorized for this media" });
-  }
-
-  // THE QUARANTINE, before anything is released (operator rulings 2026-10-12;
-  // booru-quarantine.js). An image whose booru post carries a flagged or
-  // banished tag, or troll_jail (jailed means deleted, shown nowhere), is
-  // refused to EVERY Matrix reader, admins included -- this gate knows no
-  // booru level for a Matrix token. Nor does the booru door open it: a Matrix
-  // file passes there only when a visible, non-Matrix post holds it
-  // (booru-route.js). A flagged Matrix post is reviewed in sampling's jail
-  // panel, which reads R2 itself; the booru door's reviewer opening closed
-  // 2026-10-15, when gate 3 went on.
-  // Asked after the room check, so a reader outside the room still gets the
-  // 403 and learns nothing. Checked by mxc, and for local media by every md5
-  // its one file is known under (mediar2.js localMd5s, cached with canon's
-  // index). The answer is the same "No such image." a gone image gets.
-  try {
-    const verdict = await matrixDoorVerdict({
-      quarantine,
-      serverName,
-      mediaId,
-      md5s: () => (r2Enabled && serverName === HOMESERVER_NAME
-        ? localMd5s(s3, R2_BUCKET, { mediaId, cache: { get: cacheGetJson, set: cacheSetJson }, askCanon })
-        : []),
-    });
-    if (verdict === "refuse") {
-      signals.quarantineRefused(`/media/${serverName}/${mediaId}`);
-      res.set("Cache-Control", "no-store");
-      return res.status(404).json({ errcode: "M_NOT_FOUND", error: "No such image." });
-    }
-  } catch (err) {
-    res.set("Cache-Control", "no-store");
-    res.set("Retry-After", "2");
-    if (err instanceof QuarantineUnavailable) {
-      console.error(`[media] QUARANTINE UNREADABLE -- refusing (fail closed): ${err.message}`);
-      signals.quarantineUnavailable(err.message);
-      return res.status(503).json({ errcode: "M_UNKNOWN", error: "media authorization temporarily unavailable" });
-    }
-    // The image's md5 could not be learned (canon unreachable, the bucket
-    // unreadable), so it cannot be cleared: the same 503 the original's own
-    // release would give, never a release.
-    console.error(`[media] ${serverName}/${mediaId}: quarantine check could not learn its md5 -- refusing (fail closed): ${err.message}`);
-    return res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
-  }
-
-  // R2 release, for EVERY class of media this gate can serve -- local and
-  // remote, original and thumbnail. Two ways to hand it over, and only ONE of
-  // them puts a credential in the address bar.
-  //
-  // The 302 hands the browser a presigned R2 URL: ~400 characters of
-  // X-Amz-Credential, X-Amz-Date, X-Amz-SignedHeaders and X-Amz-Signature,
-  // every one of them load-bearing, because for SigV4 the signature IS the
-  // authorization. That URL then lives in the DOM, in history, in devtools and
-  // in anything a page extension can read -- a bearer credential in a URL,
-  // which is precisely what this project's own rules say never to create. It
-  // was the right trade when the alternative was proxying every byte; it is
-  // not a small cost.
-  //
-  // Proxying instead would reuse the streaming path below and give a clean URL
-  // -- and it is WRONG HERE, which is worth writing down because the code alone
-  // makes it look like a free improvement.
-  //
-  // Operator ruling, restated 2026-08-15: "41chan is not supposed to hold media
-  // or serve media outside of site assets." The host does not permit adult
-  // content. That constraint covers bytes TRANSITING this machine, not only
-  // bytes at rest on it -- the same reason the sampling spool is a tmpfs. A
-  // proxy here would have put ~1.7 GB/day of user media through this host
-  // (888 original requests in 24h at ~2 MB each, measured from the booru's own
-  // nginx), which is exactly what the ruling forbids.
-  //
-  // So the long URL stays, and the right fix for it is somewhere else: a
-  // Cloudflare Worker fronting R2, where the bytes never enter 41chan at all.
-  // See MEDIA-URLS.md.
-  //
-  // The JSON envelope is NOT affected either way: a cors fetch() must keep
-  // receiving { url }, because a fetch that follows a cross-origin 302 gets its
-  // Origin tainted to "null" and R2's CORS allow-list cannot match it. See
-  // release.js -- that invariant is why this is a redirect-only change.
-  //
-  // Widened 2026-08-15 from local-originals-only. Thumbnails and remote
-  // originals were streaming through this host -- 3,724 thumbnail requests in
-  // 24h -- which the ruling forbids exactly as much as bytes at rest. A
-  // thumbnail key is not derivable from the request (the stored name carries
-  // the RENDERED size, not the requested one), so mediar2.js resolves it by
-  // listing that object's own thumbnail prefix, cached hard because a
-  // rendition is immutable once written.
-  //
-  // resolveR2Key returning null means R2 genuinely does not hold it, and the
-  // 404 below is then the answer, not a failure.
-  let refusal = null;
-  if (r2Enabled) {
-    try {
-      const key = await resolveR2Key(s3, R2_BUCKET, {
-        serverName,
-        mediaId,
-        isLocal: serverName === HOMESERVER_NAME,
-        thumbSize,
-        method: "scale",
-        cache: { get: cacheGetJson, set: cacheSetJson },
-        askCanon,
-      });
-      if (!key) throw new Error("not in R2");
-      // Only the edge Worker is handed the presigned URL (F-G2); a direct
-      // caller is told the decision and nothing it could fetch with.
-      const edge = isEdge(req.headers);
-      const signed = edge ? await presignKey(key) : null;
-      // Content-negotiated for the edge (see release.js for the full rationale
-      // and the never-redirect-a-cors-fetch safety invariant); no-store always.
-      return sendRelease(req, res, signed, { edge });
-    } catch (err) {
-      // An original with no stripped file is NEVER served from anywhere else.
-      // Withheld: canon refused it, so there is no file without its prompt. Not
-      // ready: canon could not be asked -- the client tries again; it never gets
-      // Synapse's unstripped copy instead.
-      if (err instanceof OriginalUnavailable) {
-        res.set("Cache-Control", "no-store");
-        if (err.code === "GONE") {
-          return res.status(404).json({ errcode: "M_NOT_FOUND", error: "No such image." });
-        }
-        if (err.code === "WITHHELD") {
-          console.warn(`[media] ${serverName}/${mediaId} withheld: ${err.message}`);
-          return res.status(404).json({ errcode: "M_NOT_FOUND", error: "This image is withheld: its generation data could not be removed." });
-        }
-        console.error(`[media] ${serverName}/${mediaId}: ${err.message}`);
-        res.set("Retry-After", "2");
-        return res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
-      }
-      // R2 could not answer: it does not hold the object (a remote user's
-      // avatar from before federation was switched off, an upload still in
-      // flight), or the presign failed. Either way the answer is the 404
-      // below -- there is no other source. The reason rides on that one line.
-      refusal = err.message;
-    }
-  }
-
-  // NO PROXY FALLBACK. Operator ruling 2026-08-15: "There is no intended
-  // fallback. None." and "41chan is not supposed to hold media or serve media
-  // outside of site assets."
-  //
-  // This used to stream from Synapse whenever R2 could not answer -- for
-  // thumbnails, for remote originals, and whenever a presign failed. Every one
-  // of those was media bytes crossing this host, and worse, it meant a request
-  // this gate had ALREADY AUTHORIZED could still be served from somewhere else,
-  // so the gate's answer was never the last word. It is now.
-  //
-  // ONE line per refused request, saying REFUSED (2026-10-13). The catch above
-  // used to log "R2 release unavailable ... proxying" before this line, from
-  // the days a proxy followed it; a re-check read that as media streaming
-  // through this host when nothing was.
-  console.error(`[media] refused ${serverName}/${mediaId}: not in object storage${refusal ? ` (${refusal})` : ""}`);
-  return res.status(404).json({ errcode: "M_NOT_FOUND", error: "media not in object storage" });
-});
+// The Matrix door. Its rules -- the token broker, the room check, the
+// tokenless release (operator ruling 2026-11-01), the quarantine and the R2
+// release -- live in media-route.js, where they are tested; this is only the
+// wiring. See that file for the order of the questions.
+const mediaCache = { get: cacheGetJson, set: cacheSetJson };
+app.get("/media/:serverName/:mediaId", makeMediaHandler({
+  allowedThumbSizes: ALLOWED_THUMB_SIZES,
+  applyCors: applyMediaCors,
+  getSession,
+  cookieName: COOKIE_NAME,
+  freshToken: (sid, session) => tokenSource.freshToken(sid, session),
+  decideMediaAccess,
+  homeserverName: HOMESERVER_NAME,
+  r2Enabled,
+  localMd5s: (mediaId) => localMd5s(s3, R2_BUCKET, { mediaId, cache: mediaCache, askCanon }),
+  // The tokenless path: an index that already exists, canon never asked.
+  localMd5sKnown: (mediaId) => localMd5s(s3, R2_BUCKET, { mediaId, cache: mediaCache, askCanon: null }),
+  visibility: booruVisibility,
+  quarantine,
+  resolveR2Key: ({ serverName, mediaId, isLocal, thumbSize }) => resolveR2Key(s3, R2_BUCKET, {
+    serverName, mediaId, isLocal, thumbSize, method: "scale", cache: mediaCache, askCanon,
+  }),
+  presign: presignKey,
+  isEdge,
+  sendRelease,
+  signals,
+  log: console,
+}));
 
 // THE INTERNAL DOOR (docker networks only: compose publishes PORT alone, and
 // nothing proxies this one). fourier-tunnel calls it after re-pointing canon's
