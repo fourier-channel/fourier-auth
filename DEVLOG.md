@@ -487,3 +487,45 @@ The Matrix door (room check) and a publication's grant (sampling) did not.
   file does not depend on that), and a 401/403 from the quarantine read
   carries the booru's own sentence -- a `gate` account still at Member is told
   to have an admin promote it, instead of "not listed, or a wrong key".
+
+
+## 2026-11-01 -- a public creator gallery's placements reach the Matrix door
+
+Operator ruling 2026-11-01 (memory gallery-placement-whitelists-gate3):
+"Images a user places on their public gallery is considered a whitelist for
+those posts that lets them through Gate 3 (specifically). Just as with all
+other signed-out content, the authorizations are temporary." Gate 3 is one
+decision for a post and its image, so a signed-out visitor shown a placed
+Matrix post must also get its picture; until now both this gate and the
+Worker answered every tokenless Matrix request 401.
+
+- `/media` moved out of `index.js` into `media-route.js` (`makeMediaHandler`,
+  every dependency injected; `media-route.test.js` drives it end to end).
+- Tokenless branch: a LOCAL media id's md5s, read from an R2 index that
+  already exists (`localMd5sKnown`: canon is never asked, a missing index is
+  remembered 20 s, so a made-up id costs one R2 read per 20 s), are put to
+  the booru's anonymous visibility ask. Yes: the unchanged quarantine, then
+  the release, counted in `anonymous_matrix_releases`. No: the identical
+  401. Booru or R2 unreadable: 503, `Retry-After: 2`. The booru answers yes
+  only for a post in its hourly shown-to-signed-out record (2 h), so the
+  grant is temporary by construction.
+- A token holder keeps the old path unchanged; one the rooms refuse gets 403
+  and is never asked as anonymous.
+- Edge envelope: a tokenless release answers `{url, anonymous: true}`; the
+  Worker keeps such an allow 60 s (not 150), so a dead or empty cookie, a
+  bare `Bearer` or another scheme cannot buy the longer signed-in hold.
+- Worker: signed-out Matrix requests are forwarded to the gate instead of
+  refused; a refusal is still M_MISSING_TOKEN and is kept 20 s.
+- Bound: a grant that lapses, or a post hidden, stops releasing within
+  about 3 min (120 s gate visibility cache + 60 s edge). A placement made
+  just after a refused ask opens within about 40 s (20 s gate + 20 s edge).
+- Review, same day: round one found an unauthenticated amplification into
+  canon and R2 for made-up ids, and a dead-cookie allow kept 150 s at the
+  edge; both fixed as above before deploy. Round two: an id not shaped
+  like a media id (over-long, a newline, a slash) reached R2, which rejects
+  it with an error rather than a miss -- a retry-forever 503 and an error
+  line carrying the stranger's text per request; it is now the same 401
+  before anything is read. Two Worker leak-audit tests (F-G2) dropped in
+  the rewrite were restored, and `anonymous_matrix_releases` now counts
+  only what passed the quarantine and R2. Deploy order: the Worker first
+  (an old Worker would keep a dead-cookie tokenless allow 150 s).

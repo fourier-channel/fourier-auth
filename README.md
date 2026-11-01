@@ -360,6 +360,16 @@ times when a module was added.
   size (180, 320, 360, 720, 850); legacy `?thumb=1` means 320. Answers 403
   when denied, 503 with `Retry-After: 1` when authorization is unavailable
   (distinct from denied), 404 `M_NOT_FOUND` when R2 lacks the object.
+  With NO usable token (none, a dead or empty session cookie, a bare or
+  non-Bearer Authorization) a LOCAL image is released only when the booru's
+  anonymous ask says a signed-out viewer may see a post holding its file --
+  a public creator gallery's fresh grant (operator ruling 2026-11-01) --
+  still subject to the quarantine; otherwise the same 401. Its md5s come
+  only from an R2 index that already exists (canon is never asked for a
+  tokenless request; a missing index is remembered 20 s). An edge caller's
+  envelope then carries `anonymous: true`. Booru or R2 unreadable: 503 with
+  `Retry-After: 2`. A token holder the rooms refuse gets 403 and is never
+  asked as anonymous.
 - `GET /booru/:file` -- booru-native objects (`media/<md5><ext>`,
   `variants/<md5>/<size>` at 180, 360, 720), released only when a post the
   requester may see carries that md5 (asked of the booru), or when a live

@@ -44,7 +44,11 @@ one copy, and an unauthorized one never reaches the line that serves it.
 2026-08-16 ruling set 240; lowered 2026-10-12 so a flagged or jailed Matrix
 image stops within about three minutes), 60 seconds for booru media -- keyed
 on a hash of the credential plus the authorization URL; denials are never
-cached. A user who leaves a room can read for at most two and a half more
+cached, with two exceptions: a gate 503 is kept for its Retry-After, and a
+signed-out Matrix 401 is kept 20 s. Signed-out Matrix media is asked of the
+gate (2026-11-01, a public creator gallery's grant): a refusal is still
+answered M_MISSING_TOKEN, and an allow the gate marks `anonymous: true` --
+or any allow to a request with no credential -- is kept 60 s, not 150. A user who leaves a room can read for at most two and a half more
 minutes. A booru post jailed or
 deleted after a reader's allow was cached keeps serving that reader for at
 most the 60 s here plus the gate's 120 s visibility cache: about three
@@ -104,6 +108,14 @@ route and on Matrix downloads alike. Two further Worker commits landed the
 same day, so the version above is the first of that deploy, not the last.
 Deployed from the box as root with the command below (wrangler 3 via npx;
 nothing is installed in the checkout).
+
+**Deployed 2026-11-01, version `2258a177`, fourier-auth 96d3ef9:** signed-out
+Matrix media is asked of the gate (a public creator gallery's grant, operator
+ruling 2026-11-01); a refusal is still M_MISSING_TOKEN, kept 20 s; an allow
+the gate marks `anonymous: true` is kept 60 s. Deployed before the gate, so no
+old Worker ever held a tokenless allow 150 s. Verified after deploy: a made-up
+id signed out reaches the gate (its `anonymous_matrix_refusals` moved) and
+answers 401 M_MISSING_TOKEN; `/_matrix/client/versions` 200.
 
 **Deployed 2026-10-19 06:21 UTC, version `e1107a7e`, fourier-auth 48e7718:**
 a gate 503 is kept at the edge for its Retry-After (2 s), under the same
