@@ -71,7 +71,7 @@
 //                          past its bound), so the Matrix door answered 503 and
 //                          grants were refused (fail closed). RED, with the fix.
 //
-// The tokenless release (operator ruling 2026-11-01; media-route.js) adds two,
+// The tokenless release (operator ruling 2026-11-01; media-route.js) adds three,
 // counted only -- neither is a check or moves the lamp:
 //
 //   anonymous_matrix_releases  a local Matrix image released at the Matrix door
@@ -80,6 +80,10 @@
 //                          post holding it (a public gallery's fresh grant).
 //   anonymous_matrix_refusals  a tokenless request for a local image the booru
 //                          said no to, answered the old 401. The gate working.
+//   grant_matrix_releases  the same release to a request WITH a token the room
+//                          check refused (operator 2026-11-01: the grant is
+//                          "not scoped to any given user"). Its refusal is
+//                          the 403 it always was, on session_refusals.
 //
 // The booru unreachable on that path is booru_unavailable, RED as above.
 //
@@ -93,7 +97,7 @@ const CAP = 5000;
 class GateSignals {
   constructor(now = () => Date.now()) {
     this.now = now;
-    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [], quarantine_refused: [], quarantine_unavailable: [], anonymous_matrix_releases: [], anonymous_matrix_refusals: [] };
+    this.rings = { session_refusals: [], unplaced_media: [], member_refusals: [], stale_unrenewable: [], refresh_failures: [], booru_unavailable: [], booru_hidden: [], matrix_refused: [], publications_unavailable: [], publication_grants: [], quarantine_refused: [], quarantine_unavailable: [], anonymous_matrix_releases: [], anonymous_matrix_refusals: [], grant_matrix_releases: [] };
     this.last = {};
   }
 
@@ -124,6 +128,7 @@ class GateSignals {
   quarantineUnavailable(detail) { this.#note("quarantine_unavailable", detail); }
   anonymousMatrixReleased(detail) { this.#note("anonymous_matrix_releases", detail); }
   anonymousMatrixRefused(detail) { this.#note("anonymous_matrix_refusals", detail); }
+  grantMatrixReleased(detail) { this.#note("grant_matrix_releases", detail); }
 
   counts(at = this.now()) {
     const out = {};

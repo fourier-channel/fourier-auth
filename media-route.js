@@ -12,8 +12,8 @@
 // The order of the questions:
 //   1. who is asking: a token (Bearer, or a fourier_session's), or nobody
 //   2a. a token: may its owner see a room holding this media (decideMediaAccess)
-//   2b. nobody: may a signed-out viewer see a booru post holding this file
-//       (the tokenless release, below)
+//   2b. nobody, or a token 2a refused: may a signed-out viewer see a booru
+//       post holding this file (the public grant, below)
 //   3. the quarantine, for both
 //   4. the release from R2
 
@@ -64,6 +64,47 @@ function makeMediaHandler(d) {
     let md5s = () => (d.r2Enabled && isLocal ? d.localMd5s(mediaId) : []);
     let anonymous = false;
 
+    // THE PUBLIC GRANT's question, asked for a tokenless request and for a
+    // token the room check refused (both explained at the tokenless release
+    // below). Only local media of a media id's shape can be asked about.
+    // Resolves to the learned md5s when the booru says a signed-out viewer may
+    // see a post holding this file, null when it says no, and false when it
+    // could not be asked -- the 503 is then already sent.
+    const grantable = d.r2Enabled && isLocal && MEDIA_ID_RE.test(mediaId);
+    const publicGrant = async (who) => {
+      let learned;
+      try {
+        learned = await d.localMd5sKnown(mediaId);
+      } catch (err) {
+        // The index could not be read (R2 failing): an md5 that cannot be
+        // learned cannot be asked about. A retry, never a release.
+        d.log.error(`[media] ${serverName}/${mediaId}: ${who} request could not learn its md5 -- refusing (fail closed): ${err.message}. ` +
+          "Fix: check that R2 (R2_ENDPOINT, R2_BUCKET and its keys) is readable from this service; the client retries.");
+        res.set("Cache-Control", "no-store");
+        res.set("Retry-After", "2");
+        res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
+        return false;
+      }
+      try {
+        for (const md5 of learned) {
+          if (await d.visibility.sees(md5, null)) return learned;
+        }
+        return null;
+      } catch (err) {
+        if (err instanceof BooruUnavailable) {
+          d.log.error(`[media] BOORU UNREACHABLE -- refusing ${who} ${serverName}/${mediaId} (fail closed): ${err.message}. ` +
+            "Fix: bring the booru's Rails app back at BOORU_INTERNAL_URL; the client retries.");
+          d.signals.booruUnavailable(err.message);
+        } else {
+          d.log.error(`[media] ${who} ${serverName}/${mediaId}: the booru's answer could not be read -- refusing (fail closed): ${err.message}`);
+        }
+        res.set("Cache-Control", "no-store");
+        res.set("Retry-After", "2");
+        res.status(503).json({ error: "media authorization temporarily unavailable" });
+        return false;
+      }
+    };
+
     if (!token) {
       // THE TOKENLESS RELEASE. Operator ruling 2026-11-01: "Images a user
       // places on their public gallery is considered a whitelist for those
@@ -105,49 +146,23 @@ function makeMediaHandler(d) {
       // ask is one answer for all of them, so while one visitor's grant is
       // fresh the image is open to every request carrying no token.
       //
-      // A request WITH a token never comes here: a token holder refused by the
-      // room check gets its 403 below and is never asked about anonymously.
+      // A request WITH a token the room check refuses is asked the same
+      // question below (operator 2026-11-01: the grant is "an unlock for gate
+      // 3 on that specific view surface and not scoped to any given user").
       // An id that is not a media id's shape is refused before anything is
       // read for it: R2 rejects an over-long or odd key with an error, not a
       // miss, which would be a retry-forever 503 and an error line per
       // request carrying the stranger's text (review 2026-11-01).
-      if (!d.r2Enabled || !isLocal || !MEDIA_ID_RE.test(mediaId)) {
+      if (!grantable) {
         return res.status(401).json({ error: "no valid session or bearer token" });
       }
-      let learned;
-      try {
-        learned = await d.localMd5sKnown(mediaId);
-      } catch (err) {
-        // The index could not be read (R2 failing): an md5 that cannot be
-        // learned cannot be asked about. A retry, never a release.
-        d.log.error(`[media] ${serverName}/${mediaId}: tokenless request could not learn its md5 -- refusing (fail closed): ${err.message}. ` +
-          "Fix: check that R2 (R2_ENDPOINT, R2_BUCKET and its keys) is readable from this service; the client retries.");
-        res.set("Cache-Control", "no-store");
-        res.set("Retry-After", "2");
-        return res.status(503).json({ errcode: "M_UNKNOWN", error: "This image is being prepared; try again in a moment." });
-      }
-      let open = false;
-      try {
-        for (const md5 of learned) {
-          if (await d.visibility.sees(md5, null)) { open = true; break; }
-        }
-      } catch (err) {
-        if (err instanceof BooruUnavailable) {
-          d.log.error(`[media] BOORU UNREACHABLE -- refusing tokenless ${serverName}/${mediaId} (fail closed): ${err.message}. ` +
-            "Fix: bring the booru's Rails app back at BOORU_INTERNAL_URL; the client retries.");
-          d.signals.booruUnavailable(err.message);
-        } else {
-          d.log.error(`[media] tokenless ${serverName}/${mediaId}: the booru's answer could not be read -- refusing (fail closed): ${err.message}`);
-        }
-        res.set("Cache-Control", "no-store");
-        res.set("Retry-After", "2");
-        return res.status(503).json({ error: "media authorization temporarily unavailable" });
-      }
-      if (!open) {
+      const opened = await publicGrant("tokenless");
+      if (opened === false) return;
+      if (!opened) {
         d.signals.anonymousMatrixRefused(path);
         return res.status(401).json({ error: "no valid session or bearer token" });
       }
-      md5s = learned;
+      md5s = opened;
       anonymous = true;
     } else {
       // Per-room authorization: Synapse authenticates the token but does NOT enforce
@@ -172,7 +187,16 @@ function makeMediaHandler(d) {
         res.set("Retry-After", "1");
         return res.status(503).json({ error: "media authorization temporarily unavailable" });
       }
-      if (!decision.allowed) {
+      // Refused by the rooms, a token holder still gets what the public grant
+      // opens to everyone -- released as a tokenless one is (anonymous: the
+      // edge keeps it 60 s, not 150), so it can never outlive the grant
+      // longer than a signed-out viewer's would.
+      const opened = !decision.allowed && grantable ? await publicGrant("refused token holder") : null;
+      if (opened === false) return;
+      if (opened) {
+        md5s = opened;
+        anonymous = true;
+      } else if (!decision.allowed) {
         // A reader who holds a session and is refused goes to the lamp WITH the
         // reason the gate refused: a dead token is red, an image in no room is
         // amber, a reader outside the image's room is the gate working. The
@@ -274,7 +298,7 @@ function makeMediaHandler(d) {
         // Content-negotiated for the edge (see release.js for the full rationale
         // and the never-redirect-a-cors-fetch safety invariant); no-store always.
         // Counted here, past the quarantine and R2: a release is what was released.
-        if (anonymous) d.signals.anonymousMatrixReleased(path);
+        if (anonymous) (token ? d.signals.grantMatrixReleased(path) : d.signals.anonymousMatrixReleased(path));
         return d.sendRelease(req, res, signed, { edge, anonymous });
       } catch (err) {
         // An original with no stripped file is NEVER served from anywhere else.

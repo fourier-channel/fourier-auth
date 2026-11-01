@@ -5,8 +5,11 @@
 // ruling 2026-11-01): a request with no token is let through gate 3 only for
 // a local image a signed-out viewer may see on the booru -- a Matrix post the
 // booru's anonymous ask answers for while a public gallery's grant is fresh.
-// Everything else a tokenless request gets is today's 401, byte for byte; and
-// a request WITH a token never takes this path, refused or not.
+// Everything else a tokenless request gets is today's 401, byte for byte. A
+// request WITH a token the room check refuses is asked the same question
+// (operator 2026-11-01: the grant is "an unlock for gate 3 on that specific
+// view surface and not scoped to any given user"), and keeps its 403 when the
+// answer is no.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -273,21 +276,62 @@ test("tokenless, not the edge: the decision and nothing it could fetch with (F-G
 
 // -- a request WITH a token keeps today's path --------------------------------
 
-test("a Bearer refused by the room check: 403, and the booru is never asked", async () => {
-  const { handler, asked, presigned } = harness();
+test("a Bearer refused by the room check, its image under a public gallery's grant: released, flagged for the edge, counted", async () => {
+  const { handler, asked, signals } = harness();
   const res = await call(handler, HS, GALLERIED_ID, { headers: { ...EDGE, authorization: "Bearer outsider" } });
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.url, /media\/41chan\.net\/galleriedMediaId/);
+  assert.equal(res.body.anonymous, true, "kept as a grant's allow at the edge: 60 s, not 150");
+  assert.deepEqual(asked, [{ md5: GALLERIED, viewer: null }], "asked as nobody: the grant is no one's");
+  assert.equal(signals.counts().grant_matrix_releases, 1);
+  assert.equal(signals.counts().anonymous_matrix_releases, 0, "a token holder is not a tokenless request");
+});
+
+test("a live session refused by the room check, its image under the grant: released", async () => {
+  const { handler, signals } = harness();
+  const res = await call(handler, HS, GALLERIED_ID, { headers: EDGE, cookies: { fourier_session: "live" } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.anonymous, true);
+  assert.equal(signals.counts().session_refusals, 0, "a release is not a refusal");
+});
+
+test("a Bearer refused by the room check, no grant: 403 as before, the booru asked once", async () => {
+  const { handler, asked, presigned } = harness();
+  const res = await call(handler, HS, PRIVATE_ID, { headers: { ...EDGE, authorization: "Bearer outsider" } });
   assert.equal(res.statusCode, 403);
   assert.deepEqual(res.body, { error: "not authorized for this media" });
-  assert.equal(asked.length, 0, "no fall back to the anonymous answer");
+  assert.deepEqual(asked, [{ md5: PRIVATE, viewer: null }]);
   assert.equal(presigned.length, 0);
 });
 
-test("a live session refused by the room check: 403, counted on the session lamp, the booru never asked", async () => {
-  const { handler, asked, signals } = harness();
-  const res = await call(handler, HS, GALLERIED_ID, { headers: EDGE, cookies: { fourier_session: "live" } });
+test("a live session refused by the room check, no grant: 403, counted on the session lamp", async () => {
+  const { handler, signals } = harness();
+  const res = await call(handler, HS, PRIVATE_ID, { headers: EDGE, cookies: { fourier_session: "live" } });
+  assert.equal(res.statusCode, 403);
+  assert.equal(signals.counts().session_refusals, 1);
+});
+
+test("a token holder refused by the room check, the booru unreachable: 503 with Retry-After, never a release", async () => {
+  const { handler, presigned } = harness({ visibility: { sees: async () => { throw new BooruUnavailable(new Error("connect ECONNREFUSED")); } } });
+  const res = await call(handler, HS, GALLERIED_ID, { headers: { ...EDGE, authorization: "Bearer outsider" } });
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.headers["retry-after"], "2");
+  assert.equal(presigned.length, 0);
+});
+
+test("a token holder refused by the room check, a galleried image now flagged: the quarantine refuses it", async () => {
+  const { handler, signals } = harness();
+  const res = await call(handler, HS, FLAGGED_ID, { headers: { ...EDGE, authorization: "Bearer outsider" } });
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(res.body, { errcode: "M_NOT_FOUND", error: "No such image." });
+  assert.equal(signals.counts().grant_matrix_releases, 0);
+});
+
+test("a token holder refused by the room check, a REMOTE server's media: 403, the booru never asked", async () => {
+  const { handler, asked } = harness();
+  const res = await call(handler, "elsewhere.org", GALLERIED_ID, { headers: { ...EDGE, authorization: "Bearer outsider" } });
   assert.equal(res.statusCode, 403);
   assert.equal(asked.length, 0);
-  assert.equal(signals.counts().session_refusals, 1);
 });
 
 test("a Bearer the room check allows is released without an anonymous ask, unflagged, its md5s asked of canon", async () => {
