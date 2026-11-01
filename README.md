@@ -368,8 +368,10 @@ times when a module was added.
   only from an R2 index that already exists (canon is never asked for a
   tokenless request; a missing index is remembered 20 s). An edge caller's
   envelope then carries `anonymous: true`. Booru or R2 unreadable: 503 with
-  `Retry-After: 2`. A token holder the rooms refuse gets 403 and is never
-  asked as anonymous.
+  `Retry-After: 2`. A token holder the rooms refuse is asked the same
+  anonymous question for a local image (the grant is "not scoped to any
+  given user", operator 2026-11-01): yes releases as a tokenless one would,
+  `anonymous: true`, counted in `grant_matrix_releases`; no is the old 403.
 - `GET /booru/:file` -- booru-native objects (`media/<md5><ext>`,
   `variants/<md5>/<size>` at 180, 360, 720), released only when a post the
   requester may see carries that md5 (asked of the booru), or when a live

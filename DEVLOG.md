@@ -529,3 +529,19 @@ Worker answered every tokenless Matrix request 401.
   the rewrite were restored, and `anonymous_matrix_releases` now counts
   only what passed the quarantine and R2. Deploy order: the Worker first
   (an old Worker would keep a dead-cookie tokenless allow 150 s).
+
+### Later on 2026-11-01 -- the grant reaches a signed-in reader too
+
+Operator: "Yes a signed in viewer also gets the whitelist. It's an unlock for
+gate 3 on that specific view surface and not scoped to any given user."
+
+- A token holder the room check refuses is now asked the booru's anonymous
+  question for a local image (`publicGrant` in `media-route.js`, shared with
+  the tokenless branch). Yes: the quarantine, then the release with
+  `anonymous: true`, so the edge keeps it 60 s like any grant's allow and it
+  cannot outlive the grant longer than a signed-out viewer's. Counted in
+  `grant_matrix_releases`. No: the 403 it always got, on the session lamp.
+  Booru or R2 unreadable: 503, `Retry-After: 2`. Remote media: 403, never
+  asked.
+- The booru side: any view of a public gallery now records its placements,
+  and the anonymous md5 ask answers yes for a placed post.
