@@ -1,0 +1,97 @@
+# What fourier-auth holds about a person, for `coherence erase`.
+#
+# Specification: fourier-basis docs/design/DATA_ERASURE.md section 4; the
+# inventory rows cited are DATA_ERASURE_INVENTORY/fourier.md section 1.1.
+# Checked by `coherence erase registry`.
+#
+# Everything here lives in the ephemeral Redis `fourier-redis` (--save "",
+# --appendonly no, redis/docker-compose.yaml:9): no disk, no backup. The only
+# other place a person appears is the container's stdout. The checkout in
+# /opt/fourier/auth holds code and config and nothing about a person.
+
+adapter: tools/erase.js
+
+stores:
+  # A1. The login session: Matrix id, the Matrix access token and refresh token.
+  # The key is the random session id, the mxid is inside the value, so the
+  # adapter SCANs session:* and deletes the subject's (session.js:31-49). Left
+  # alone it dies at 24 h (SESSION_TTL), which is inside every bound.
+  - id: auth.sessions
+    where: Redis fourier-redis on 41chan, key session:<64-hex sid>
+    holds: [mxid]
+    locate: SCAN session:* and match the value's matrixUserId (no mxid index exists)
+    fields:
+      matrixUserId: {fate: GONE}
+      matrixToken: {fate: GONE}
+      refreshToken: {fate: GONE}
+      tokenExpiresAt: {fate: GONE}
+      createdAt: {fate: GONE}
+
+  # A2. "Your previous token ended #s ago": digest of a dead sid and a time,
+  # keyed by the mxid (session.js:95-104). Written on explicit logout only.
+  # Its natural life is 30 d, so the adapter must delete it: DEL prevsession:<mxid>.
+  - id: auth.prevsession
+    where: Redis fourier-redis on 41chan, key prevsession:<mxid>
+    holds: [mxid]
+    locate: DEL prevsession:<mxid> (the key is the mxid)
+    fields:
+      key: {fate: GONE}
+      digest: {fate: GONE}
+      endedAt: {fate: GONE}
+
+  # A5. "Uploader still in room" answer, mxid in the key (mediaauth-core.js:152,
+  # :219). Not worth a scan: it ages out on its own TTL of 6 h.
+  - id: auth.cache-uploader-in
+    where: Redis fourier-redis on 41chan, key uploaderin:<roomId>:<uploader mxid>
+    holds: [mxid, dm_room_ids]
+    bound: 6h
+    evidence: mediaauth-core.js:53
+    fields:
+      key: {fate: GONE}
+
+  # Who uploaded a media id: the uploader mxid is the cached value
+  # (mediaauth-core.js:142). TTL 24 h. Not in the inventory table; found in code.
+  - id: auth.cache-uploader
+    where: Redis fourier-redis on 41chan, key uploader:mxc://<server>/<mediaId>
+    holds: [mxid]
+    bound: 1d
+    evidence: mediaauth-core.js:53
+    fields:
+      value: {fate: GONE}
+
+  # A4. The joined-rooms list a token can see, keyed by a hash of the token
+  # (mediaauth-core.js:156). TTL 5 min; it goes with A1 as well.
+  - id: auth.cache-joined-rooms
+    where: Redis fourier-redis on 41chan, key userrooms:<hash(token)>
+    holds: [dm_room_ids]
+    bound: 5m
+    evidence: mediaauth-core.js:48
+    fields:
+      value: {fate: GONE}
+
+  # The rooms gate's per-viewer room list, keyed by the mxid (rooms-gate.js:36,
+  # :76). TTL is 10 s.
+  - id: auth.cache-viewer-rooms
+    where: Redis fourier-redis on 41chan, key viewerrooms1:<mxid>
+    holds: [mxid, dm_room_ids]
+    bound: 10s
+    evidence: rooms-gate.js:37
+    fields:
+      key: {fate: GONE}
+      value: {fate: GONE}
+
+logs:
+  # [oidc] session minted for <mxid> (index.js:342) goes to stdout. The compose
+  # file has no `logging:` block, so the container is on the daemon default:
+  # json-file 50m x 3 until it is recreated on the journald driver, emptied by
+  # host-log-retention when the oldest line is over 5 days (inventory 1.1, 2.3).
+  - id: auth.container-log
+    where: docker json-file log of fourier-auth on 41chan
+    holds: [mxid]
+    bound: 6d
+    pruner: host-log-retention.timer
+
+paths:
+  # The checkout and its compose/.env: code and secrets, nothing about a person.
+  - path: /opt/fourier/auth
+    holds: []
