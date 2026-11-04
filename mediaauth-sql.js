@@ -36,9 +36,10 @@ function makeQueries(db, { homeserverName = "41chan.net" } = {}) {
   // A REDACTED event states nothing (ruled 2026-10-15: deleting a message hides
   // its image at once). Synapse prunes a redacted member event to its
   // membership, a room avatar and an emote pack to nothing, so once it scrubs
-  // the stored copy (~7 days later) these arms stop matching anyway; the
+  // the stored copy (redaction_retention_period later: 1 d, synapse-deploy
+  // homeserver.d/redaction.yaml) these arms stop matching anyway; the
   // anti-join makes that true the moment the redaction is persisted instead of
-  // a week later, so the image's answer does not change twice. The profiles
+  // a day later, so the image's answer does not change twice. The profiles
   // arm has no event to redact. Needs SELECT on redactions.
   async function queryIsSiteAsset(mxc, uploader = null, serverName = homeserverName) {
     const { rows } = await db.query(
@@ -85,7 +86,7 @@ function makeQueries(db, { homeserverName = "41chan.net" } = {}) {
   //
   // A REDACTED placement does not count (operator ruling 2026-10-15: deleting
   // a message hides its image at once -- for the image and so for the post --
-  // not when Synapse scrubs the content ~7 days later). The anti-join is on the
+  // not when Synapse scrubs the content a day later). The anti-join is on the
   // candidate set, so it holds on EVERY arm and on both sides of the forward
   // rule: an uploader who deletes their post also stops vouching for forwards
   // made by members of that room. It reads Synapse's redactions table as
@@ -254,17 +255,21 @@ function makeQueries(db, { homeserverName = "41chan.net" } = {}) {
     return rows.length > 0 ? { event_id: rows[0].event_id, type: rows[0].type } : null;
   }
 
-  // What a redaction took away: the target's content.url, by event id. Read
-  // before Synapse scrubs it (~7 days); after that the target carries no url
-  // and there is nothing to re-ask from it.
+  // What a redaction took away, by event id: { url, scrubbed }. The url is
+  // the target's content.url, readable until Synapse scrubs it
+  // (redaction_retention_period: 1 d, synapse-deploy homeserver.d/redaction.yaml);
+  // after that the content is empty, there is no url and nothing to re-ask
+  // from it, and scrubbed says so -- so the reader can tell "deleted a text
+  // message" from "deleted something it can no longer see".
   async function queryRedactionTargets(eventIds) {
     if (eventIds.length === 0) return new Map();
     const { rows } = await db.query(
-      `select ej.event_id, ej.json::jsonb #>> '{content,url}' as url
+      `select ej.event_id, ej.json::jsonb #>> '{content,url}' as url,
+              coalesce(ej.json::jsonb -> 'content', '{}'::jsonb) = '{}'::jsonb as scrubbed
          from event_json ej where ej.event_id = any($1::text[])`,
       [eventIds]
     );
-    return new Map(rows.map((r) => [r.event_id, r.url]));
+    return new Map(rows.map((r) => [r.event_id, { url: r.url, scrubbed: r.scrubbed === true }]));
   }
 
   // Uploaders of many local media ids in one round trip, null for no record --

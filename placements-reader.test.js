@@ -56,7 +56,7 @@ function synapse({ head, tail = 1, events = [], uploaders = {}, siteAssets = [],
       }));
     },
     queryEventAt: async (so) => { const e = w.events.find((x) => x.so === so); return e ? { event_id: e.id, type: e.type } : null; },
-    queryRedactionTargets: async (ids) => new Map(w.events.filter((e) => ids.includes(e.id)).map((e) => [e.id, e.url ?? null])),
+    queryRedactionTargets: async (ids) => new Map(w.events.filter((e) => ids.includes(e.id)).map((e) => [e.id, { url: e.url ?? null, scrubbed: !!e.scrubbed }])),
     queryUploaders: async (ids) => new Map(ids.filter((id) => id in w.uploaders).map((id) => [id, w.uploaders[id]])),
     queryIsSiteAsset: async (m) => { w.asked.push(["site", m]); return w.siteAssets.has(m); },
     queryMediaRooms: async (m, up) => {
@@ -166,6 +166,36 @@ test("a redaction re-asks the image it took away, at the redaction's ordering", 
   const b = booru({ cursor: { ...parked, live: 15 } });
   await reader(s, b).step();
   assert.deepEqual(livePushes(b)[0].mxcs.map((m) => [m.mxc, m.newest_ordering]), [[mxc("gone"), 20]]);
+});
+
+test("a LIVE redaction whose target Synapse already scrubbed is a named redaction skip, not a silent drop; a text message's is neither", async () => {
+  const s = synapse({ head: 40, events: [
+    { so: 10, id: "$gone", type: "m.room.message", scrubbed: true },
+    { so: 15, id: "$text", type: "m.room.message" },
+    { so: 20, id: "$red", type: "m.room.redaction", redacts: "$gone" },
+    { so: 30, id: "$red2", type: "m.room.redaction", redacts: "$text" },
+  ] });
+  const b = booru({ cursor: { ...parked, live: 15 } });
+  const r = reader(s, b);
+  await r.step();
+  const skipped = livePushes(b).flatMap((p) => p.skipped);
+  assert.deepEqual(skipped.map((x) => [x.event_id, x.reason]), [["$red", "scrubbed_target:redaction_retention_period"]]);
+  const pub = r.health();
+  assert.equal(pub.level, "amber");
+  assert.deepEqual(pub.skipped, { count: 1, distinct: 1, redactions: 1 });
+  assert.match(pub.detail, /1 of them redactions \(a deleted post may stay visible\)/);
+});
+
+test("the SWEEP meets old redactions of scrubbed targets every lap and says nothing: that is normal past the retention", async () => {
+  const s = synapse({ head: 1000, tail: 1, events: [
+    { so: 10, id: "$gone", type: "m.room.message", scrubbed: true },
+    { so: 20, id: "$red", type: "m.room.redaction", redacts: "$gone" },
+  ] });
+  const b = booru({ cursor: { live: 1000, sweep: null, lap_started_at: null } });
+  const r = reader(s, b, { lapHours: 0.001 });
+  for (let i = 0; i < 3; i++) { await r.step(); s.w.clock += 4000; }
+  assert.deepEqual(b.pushes.flatMap((p) => p.placements.skipped), []);
+  assert.deepEqual(r.health().skipped, { count: 0, distinct: 0, redactions: 0 });
 });
 
 test("start: with no live cursor at the booru the reader starts at Synapse's head -- history is the sweep's", async () => {

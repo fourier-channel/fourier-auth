@@ -280,8 +280,19 @@ test("gate 3 reader queries: bounds, an event by ordering, redaction targets, up
   assert.deepEqual((await q.queryEventAt(5006)).type, "m.room.redaction");
   assert.equal(await q.queryEventAt(4999), null);
   const t = await q.queryRedactionTargets([tpImage, "$nope"]);
-  assert.equal(t.get(tpImage), mxc("tp1"));
+  assert.deepEqual(t.get(tpImage), { url: mxc("tp1"), scrubbed: false });
   assert.equal(t.has("$nope"), false);
+  // As Synapse's censor job leaves a redacted message past
+  // redaction_retention_period: the event pruned to an empty content.
+  await client.query("insert into event_json values ('$scrubbed', '!tp', $1), ('$noContent', '!tp', $2)",
+    [JSON.stringify({ type: "m.room.message", sender: V, content: {} }), JSON.stringify({ type: "m.room.message", sender: V })]);
+  try {
+    const sc = await q.queryRedactionTargets(["$scrubbed", "$noContent"]);
+    assert.deepEqual(sc.get("$scrubbed"), { url: null, scrubbed: true });
+    assert.deepEqual(sc.get("$noContent"), { url: null, scrubbed: true });
+  } finally {
+    await client.query("delete from event_json where event_id in ('$scrubbed', '$noContent')");
+  }
   const u = await q.queryUploaders(["tp1", "dm1", "unknown"]);
   assert.equal(u.get("tp1"), V);
   assert.equal(u.get("dm1"), V);

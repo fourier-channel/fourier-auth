@@ -53,6 +53,15 @@
 //     never stops the reader). An unreadable REDACTION is named apart
 //     (unreadable_redaction, unreadable_target): it is a deleted post that may
 //     stay visible, where an unreadable image only narrows.
+//   - A LIVE redaction whose target Synapse has already scrubbed is named
+//     too (scrubbed_target). Synapse's censor job prunes a redacted event's
+//     JSON to nothing once redaction_retention_period has passed (1 d,
+//     synapse-deploy homeserver.d/redaction.yaml, ruling E3), and then the url
+//     the redaction took away cannot be read from anywhere: the sweep cannot
+//     re-ask it either, because the image event itself is pruned. Live, this
+//     happens only when the reader fell more than a day behind (stopped, or
+//     resumed from an old cursor), so it is said, never dropped. The sweep
+//     meets every old redaction this way on every lap, which is normal there.
 //   - One image whose answer hits the 5 s statement timeout (57014) is asked
 //     once more and then skipped as answer_timeout, so one pathological image
 //     cannot hold every page behind it forever (review 2026-10-15). Bounded:
@@ -299,7 +308,7 @@ const isDataError = (err) => !!err && typeof err.code === "string" && err.code.s
 const isTimeout = (err) => !!err && err.code === "57014";
 // A skip that may leave a DELETED post visible, as against an image the booru
 // merely does not know yet.
-const isRedactionSkip = (reason) => /^unreadable_(redaction|target):/.test(reason);
+const isRedactionSkip = (reason) => /^(unreadable_(redaction|target)|scrubbed_target):/.test(reason);
 
 const MXC_RE = /^mxc:\/\/([^/\s]+)\/([A-Za-z0-9_-]+)$/;
 function parseMxc(url) {
@@ -373,8 +382,8 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
     }
   }
 
-  // The url each redaction took away, by target event id. A target whose JSON
-  // cannot be read is isolated the same way a row is.
+  // What each redaction took away, by target event id: { url, scrubbed }. A
+  // target whose JSON cannot be read is isolated the same way a row is.
   async function readTargets(q, rows, skipped) {
     const reds = rows.filter((r) => r.type === "m.room.redaction" && typeof r.redacts === "string");
     const ids = [...new Set(reds.map((r) => r.redacts))];
@@ -414,7 +423,15 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
 
     const touches = [];
     for (const r of rows) {
-      const url = r.type === "m.room.redaction" ? (typeof r.redacts === "string" ? targets.get(r.redacts) : null) : r.url;
+      let url = r.url;
+      if (r.type === "m.room.redaction") {
+        const t = typeof r.redacts === "string" ? targets.get(r.redacts) : undefined;
+        url = t ? t.url : null;
+        if (t && t.scrubbed && stream === "live") {
+          skipped.push({ stream_ordering: r.stream_ordering, event_id: r.event_id, reason: "scrubbed_target:redaction_retention_period" });
+          continue;
+        }
+      }
       const m = parseMxc(url);
       // Remote media is skipped silently: the tunnel posts local media only.
       if (!m || m.serverName !== homeserverName) continue;
@@ -523,7 +540,9 @@ function createPlacementsReader({ withSnapshot, booru, homeserverName, onLiveAns
       }
       log.error(`[gate3-reader] SKIPPED event ${s.event_id} at stream_ordering ${s.stream_ordering} (${s.reason}); the rest of its page was pushed. ` +
         (isRedactionSkip(s.reason) ? "A redaction: the post it deleted may stay visible. " : "") +
-        "Read the row in Synapse's events/event_json to see why it cannot be read");
+        (/^scrubbed_target:/.test(s.reason)
+          ? "Synapse had already scrubbed its target (the reader was more than redaction_retention_period behind): find the booru post by the target event id and hide it by hand"
+          : "Read the row in Synapse's events/event_json to see why it cannot be read"));
     }
   }
 
